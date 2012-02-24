@@ -21,7 +21,6 @@
 #define l_trylock(x)  (atomicExch(&(x),1))
 #define l_lock(x)     while(l_trylock(x) != 0);
 #define l_unlock(x)   (atomicExch(&(x),0))
-#define barrier()      __syncthreads(); 
 
 //
 // Node and table
@@ -62,9 +61,12 @@ namespace TABLE {
 	__device__ Node* get_node() {
 		if(size > 0) {	
 			l_lock(lock);
-			size--;
-			head++;
-			head->clear();
+			if(size > 0) {
+				size--;
+				head++;
+				head->clear();
+			} else 
+				head = 0;
 			l_unlock(lock);
 			return head;
 		} else {
@@ -109,6 +111,7 @@ namespace TABLE {
 			lsb = m & -m;
 
 			Node* node = get_node();
+			if(!node) break;
 			node->move = lsb;
 			node->parent = n;
 			if(last == n) last->child = node;
@@ -214,7 +217,7 @@ U32 BOARD::playout() {
 		player_ = player;
 		emptyc_ = emptyc;
 	}
-	barrier();
+	__syncthreads();
 	
 	U32 wins = 0;
 	for(U32 i = 0;i < nLoop;i++) {
@@ -279,26 +282,29 @@ void playout(int N) {
 
 			if(n->uct_visits) {
 				TABLE::create_children(&sb,n);
-				n = n->child;
-				do_move(&sb,n->move);
+				Node* next = TABLE::UCT_select(n);
+				if(next) {
+					do_move(&sb,next->move);
+					n = next;
+				}
 			}
 		}
 		b.wpawns = sb.wpawns;
 		b.all = sb.all;
 		b.player = sb.player;
 		b.emptyc = sb.emptyc;
-		barrier();
+		__syncthreads();
 
 		//playout the position
 		cache[threadId] = b.playout();
 
 		//reduction : works for power of 2 block size
-		barrier();
+		__syncthreads();
 		int i = blockDim.x / 2;
 		while (i != 0) {
 			if (threadId < i)
 				cache[threadId] += cache[threadId + i];
-			barrier();
+			__syncthreads();
 			i /= 2;
 		}
 
@@ -321,7 +327,7 @@ void playout(int N) {
 			if(TABLE::root_node->uct_visits >= N)
 				finished = true;
 		}
-		barrier();
+		__syncthreads();
 		if(finished)
 			break;
 	}
