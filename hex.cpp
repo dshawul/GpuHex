@@ -99,7 +99,7 @@ void print_bitboard(U64 b){
 }
 
 int main() {
-	const U32 nSimulations = 8 * 14 * 256 * 32; 
+	const U32 nSimulations = 8 * 14 * 256 * 3200; 
 
 	init_device();
 

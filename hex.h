@@ -1,7 +1,7 @@
 #ifndef __HEX_H
 #define __HEX_H
 
-//#define GPU
+#define GPU
 
 typedef unsigned __int64 U64;
 typedef unsigned int U32;
