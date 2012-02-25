@@ -8,7 +8,7 @@ using namespace std;
 //#define GPU
 
 //
-// Board
+// Define board game
 //
 
 typedef unsigned __int64 U64;
@@ -24,7 +24,7 @@ struct BOARD {
 	char player;
 	char emptyc;
 
-	U32 playout();
+	U32 playout(const BOARD&);
 	void make_random_move();
 	bool is_white_win();
 
@@ -106,6 +106,23 @@ bool BOARD::is_white_win() {
 	return false;
 }
 
+#define nLoop     64
+
+__device__ __host__
+U32 BOARD::playout(const BOARD& b) {
+	U32 wins = 0;
+	for(U32 i = 0;i < nLoop;i++) {
+		this->copy(b);
+
+		while(emptyc > 0)
+			make_random_move();
+			
+		if(is_white_win())
+			wins++;
+	}
+	return wins;
+}
+
 //
 // GPU specific code
 //
@@ -115,7 +132,6 @@ bool BOARD::is_white_win() {
 
 #define nThreads  32
 #define nBlocks   112
-#define nLoop     64
 #define TT_SIZE   4194304
 #define UCTK      0.44
 #define FPU       10000
@@ -200,18 +216,15 @@ namespace TABLE {
 							float(current->uct_wins) / current->uct_visits
 							);
 					}
-					//child
 					if(current->child && depth < depthLimit) {
 						depth++;
 						current = current->child;
 					} else break;
 				}
-				//sibling
 				if(current->next) {
 					current = current->next;
 				} else break;
 			}
-			//parent
 			if(current->parent) {
 				depth--;
 				current = current->parent->next;
@@ -279,32 +292,6 @@ namespace TABLE {
 		cudaFree(hmem_);
 	}
 }
-	
-//
-// Device code
-//
-
-__device__ 
-U32 BOARD::playout() {
-	__shared__ BOARD b;
-
-	if(threadIdx.x == 0) {
-		b.copy(*this);
-	}
-	__syncthreads();
-	
-	U32 wins = 0;
-	for(U32 i = 0;i < nLoop;i++) {
-		this->copy(b);
-
-		while(emptyc > 0)
-			make_random_move();
-			
-		if(is_white_win())
-			wins++;
-	}
-	return wins;
-}
 
 //
 // Global code
@@ -352,7 +339,7 @@ void playout(int N) {
 		__syncthreads();
 
 		//playout the position
-		cache[threadId] = b.playout();
+		cache[threadId] = b.playout(sb);
 
 		//reduction : works for power of 2 block size
 		__syncthreads();
@@ -466,38 +453,23 @@ void finalize_device() {
 }
 
 #else
-//
-// CPU code for monte carlo simulation. It is out of sync with the cuda
-// code because it is rarely updated.
-//
-U32 nLoop;
-
-__host__ 
-U32 BOARD::playout() {
-	BOARD b;
-
-	b.copy(*this);
-	
-	U32 wins = 0;
-	for(U32 i = 0;i < nLoop;i++) {
-		this->copy(b);
-
-		while(emptyc > 0)
-			make_random_move();
-			
-		if(is_white_win())
-			wins++;
-	}
-	return wins;
-}
-
 __host__
 void simulate(BOARD* b,U32 N) {
+	BOARD sb;
+	sb.copy(*b);
 	b->seed(0);
-	nLoop = N;
-	U32 wins = b->playout();
+	U32 wins = 0;
+	for(U32 i = 0;i < N;i += nLoop)
+		wins += b->playout(sb);
 	printf("%u %u %.6f\n",wins,N,float(wins)/N);
 }
+__host__
+void init_device() {
+}
+__host__
+void finalize_device() {
+}
+#endif
 
 __host__
 void print_bitboard(U64 b){
@@ -515,17 +487,10 @@ void print_bitboard(U64 b){
 	s += "\n";
 	printf("%s",s.c_str());
 }
-__host__
-void init_device() {
-}
-
-__host__
-void finalize_device() {
-}
-#endif
 
 int main() {
-	const U32 nSimulations = 8 * 14 * 256 * 16;//00; 
+	const U32 nSimulations = 
+		8 * 14 * 256 * 1600; 
 
 	init_device();
 
