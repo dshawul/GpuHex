@@ -1,6 +1,114 @@
 #include <cuda.h>
-#include "hex.h"
+#include <string>
+#include <ctime>
+#include <cstdio>
 
+using namespace std;
+
+//#define GPU
+
+//
+// Board
+//
+
+typedef unsigned __int64 U64;
+typedef unsigned int U32;
+typedef U64 MOVE;
+
+#define UINT64(x) (x##ui64)
+
+struct BOARD {
+	U64 wpawns;
+	U64 all;
+	U32 randn;
+	char player;
+	char emptyc;
+
+	U32 playout();
+	void make_random_move();
+	bool is_white_win();
+
+	__device__ __host__
+	void clear() {
+		wpawns = 0;
+		all = UINT64(0xffffffffffffffff);
+		emptyc = 64;
+		player = 0;
+	}
+
+	__host__ __device__
+	void copy(const BOARD& b) {
+		wpawns = b.wpawns;
+		all = b.all;
+		player = b.player;
+		emptyc = b.emptyc;
+	}
+
+	__device__ __host__
+	void do_move(const MOVE& move) {
+		all ^= move;
+		wpawns ^= move;
+		player ^= 1;
+		emptyc--;
+	}
+
+	__device__ __host__
+	void undo_move(const MOVE& move) {
+		all ^= move;
+		wpawns ^= move;
+		player ^= 1;
+		emptyc++;
+	}
+
+	__device__ __host__
+	void seed(int sd) {
+			randn = sd;
+	}
+
+	__device__ __host__
+	U32 rand() {
+		randn *= 214013;
+		randn += 2531011;
+		return ((randn >> 16) & 0x7fff);
+	}
+};
+
+
+__device__ __host__
+void BOARD::make_random_move() {
+	U32 rbit = rand() % emptyc;
+	U64 mbit = all;
+	for(U32 i = 0;i < rbit;i++)
+		mbit &= mbit - 1; 
+	mbit = mbit & -mbit;
+
+	if(player == 0)
+		wpawns ^= mbit;
+	all ^= mbit;
+	player ^= 1;
+	emptyc--;
+}
+
+__device__ __host__
+bool BOARD::is_white_win() {
+	U64 m = (wpawns & UINT64(0x00000000000000ff)),oldm;
+	do {
+		oldm = m;
+		m |=((((m << 8) | (m >> 8)) | 
+			 (((m << 9) | (m << 1)) & UINT64(0xfefefefefefefefe)) | 
+			 (((m >> 9) | (m >> 1)) & UINT64(0x7f7f7f7f7f7f7f7f))) 
+			 & wpawns
+			);
+		if(m & UINT64(0xff00000000000000)) {
+			return true;
+		}
+	} while(m != oldm);
+	return false;
+}
+
+//
+// GPU specific code
+//
 #ifdef GPU
 
 #include "cuPrintf.cu"
@@ -10,7 +118,8 @@
 #define nLoop     64
 #define TT_SIZE   4194304
 #define UCTK      0.44
-#define FPU       1.10
+#define FPU       10000
+//1.10
 
 //
 // Lock
@@ -25,8 +134,6 @@
 //
 // Node and table
 //
-
-typedef U64 MOVE;
 
 struct Node {
 	U32 uct_wins;
@@ -79,7 +186,7 @@ namespace TABLE {
 		root_node = get_node();
 	}
 
-	__global__ void printTree(int depthLimit) {
+	__global__ void print_tree(int depthLimit) {
 		int depth = 0;
 		Node* current = root_node;
 		while(current) {
@@ -178,71 +285,17 @@ namespace TABLE {
 //
 
 __device__ 
-void BOARD::seed(int sd) {
-	randn = sd;
-}
-
-__device__ 
-U32 BOARD::rand() {
-	randn *= 214013;
-	randn += 2531011;
-	return ((randn >> 16) & 0x7fff);
-}
-
-__device__ 
-void BOARD::make_random_move() {
-	U32 rbit = rand() % emptyc;
-	U64 mbit = all;
-	for(U32 i = 0;i < rbit;i++)
-		mbit &= mbit - 1; 
-	mbit = mbit & -mbit;
-
-	if(player == 0)
-		wpawns ^= mbit;
-	all ^= mbit;
-	player ^= 1;
-	emptyc--;
-}
-
-__device__
-bool BOARD::is_white_win() {
-	U64 m = (wpawns & UINT64(0x00000000000000ff)),oldm;
-	do {
-		oldm = m;
-		m |=((((m << 8) | (m >> 8)) | 
-			 (((m << 9) | (m << 1)) & UINT64(0xfefefefefefefefe)) | 
-			 (((m >> 9) | (m >> 1)) & UINT64(0x7f7f7f7f7f7f7f7f))) 
-			 & wpawns
-			);
-		if(m & UINT64(0xff00000000000000)) {
-			return true;
-		}
-	} while(m != oldm);
-	return false;
-}
-
-__device__ 
 U32 BOARD::playout() {
-	__shared__ U64 wpawns_;
-	__shared__ U64 all_;
-	__shared__ char player_;
-	__shared__ char emptyc_;
+	__shared__ BOARD b;
 
 	if(threadIdx.x == 0) {
-		wpawns_ = wpawns;
-		all_ = all;
-		player_ = player;
-		emptyc_ = emptyc;
+		b.copy(*this);
 	}
 	__syncthreads();
 	
 	U32 wins = 0;
 	for(U32 i = 0;i < nLoop;i++) {
-	
-		wpawns = wpawns_;
-		all = all_;
-		player = player_;
-		emptyc = emptyc_;
+		this->copy(b);
 
 		while(emptyc > 0)
 			make_random_move();
@@ -251,14 +304,6 @@ U32 BOARD::playout() {
 			wins++;
 	}
 	return wins;
-}
-
-__device__ 
-void do_move(BOARD* b, const MOVE& move) {
-	b->all ^= move;
-	b->wpawns ^= move;
-	b->player ^= 1;
-	b->emptyc--;
 }
 
 //
@@ -287,29 +332,23 @@ void playout(int N) {
 		//get node
 		if(threadId == 0) {
 			n = TABLE::root_node;
-			sb.wpawns = TABLE::root_board.wpawns;
-			sb.all = TABLE::root_board.all;
-			sb.player = TABLE::root_board.player;
-			sb.emptyc = TABLE::root_board.emptyc;
+			sb.copy(TABLE::root_board);
 			
 			while(n->child) {
 				n = TABLE::UCT_select(n);
-				do_move(&sb,n->move);
+				sb.do_move(n->move);
 			}
 
 			if(n->uct_visits) {
 				TABLE::create_children(&sb,n);
 				Node* next = TABLE::UCT_select(n);
 				if(next) {
-					do_move(&sb,next->move);
+					sb.do_move(next->move);
 					n = next;
 				}
 			}
 		}
-		b.wpawns = sb.wpawns;
-		b.all = sb.all;
-		b.player = sb.player;
-		b.emptyc = sb.emptyc;
+		b.copy(sb);
 		__syncthreads();
 
 		//playout the position
@@ -354,8 +393,6 @@ void playout(int N) {
 // Host code
 //
 
-#include <stdio.h>
-
 __host__ 
 void simulate(BOARD* b,U32 N) {
 	cudaMemcpyToSymbol(TABLE::root_board,b,
@@ -363,7 +400,7 @@ void simulate(BOARD* b,U32 N) {
 
 	TABLE::reset <<<1,1>>> ();
 	playout <<<nBlocks,nThreads>>> (N); 
-	TABLE::printTree <<<1,1>>> (1);
+	TABLE::print_tree <<<1,1>>> (12);
 
     cudaPrintfDisplay();
 	printf("Errors: %s\n", 
@@ -427,8 +464,83 @@ void finalize_device() {
 	cudaPrintfEnd();
 	TABLE::release();
 }
+
+#else
+//
+// CPU code for monte carlo simulation. It is out of sync with the cuda
+// code because it is rarely updated.
+//
+U32 nLoop;
+
+__host__ 
+U32 BOARD::playout() {
+	BOARD b;
+
+	b.copy(*this);
+	
+	U32 wins = 0;
+	for(U32 i = 0;i < nLoop;i++) {
+		this->copy(b);
+
+		while(emptyc > 0)
+			make_random_move();
+			
+		if(is_white_win())
+			wins++;
+	}
+	return wins;
+}
+
+__host__
+void simulate(BOARD* b,U32 N) {
+	b->seed(0);
+	nLoop = N;
+	U32 wins = b->playout();
+	printf("%u %u %.6f\n",wins,N,float(wins)/N);
+}
+
+__host__
+void print_bitboard(U64 b){
+	string s = "";
+	for(int i=7;i>=0;i--) {
+		for(int z = 0; z < i;z++)
+			s += "  ";
+		for(int j=0;j<8;j++) {
+			U64 m = (((U64)1) << (i * 8 + j));
+			if(b & m) s += "1 ";
+			else s += "0 ";
+		}
+		s += "\n";
+	}
+	s += "\n";
+	printf("%s",s.c_str());
+}
+__host__
+void init_device() {
+}
+
+__host__
+void finalize_device() {
+}
+#endif
+
+int main() {
+	const U32 nSimulations = 8 * 14 * 256 * 16;//00; 
+
+	init_device();
+
+	BOARD b;
+	b.clear();
+    clock_t start,end;
+	start = clock();
+	simulate(&b,nSimulations);
+	end = clock();
+	printf("time %d\n",end - start);
+
+	finalize_device();
+}
+
 //
 // end
 //
 
-#endif
