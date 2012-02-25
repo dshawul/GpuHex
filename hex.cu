@@ -126,6 +126,7 @@ U32 BOARD::playout(const BOARD& b) {
 //
 // GPU specific code
 //
+
 #ifdef GPU
 
 #include "cuPrintf.cu"
@@ -275,7 +276,7 @@ namespace TABLE {
 				value = UCTK * sqrtf(logn / (current->uct_visits + 1))
 					+ (current->uct_wins + 1) / (current->uct_visits + 1);
 			} else {
-				value = FPU - (current->workers / 32.f);
+				value = FPU - (current->workers / float(nBlocks));
 			}
 			if(value > bvalue) {
 				bvalue = value;
@@ -358,6 +359,8 @@ void playout(int N) {
 
 		//update result
 		if (threadId == 0) {
+			atomicSub(&n->workers,1);
+
 			U32 score;
 			if(sb.player == 0) 
 				score = cache[0];
@@ -369,7 +372,6 @@ void playout(int N) {
 				current->uct_wins += score;
 				current->uct_visits += nLoop * nThreads;
 				l_unlock(current->lock);
-				atomicSub(&current->workers,1);
 				score = nLoop * nThreads - score;
 				current = current->parent;
 			}
@@ -496,7 +498,7 @@ void print_bitboard(U64 b){
 
 int main() {
 	const U32 nSimulations = 
-		(8 * 14) * (32) * (128 * 8);
+		nBlocks * nThreads * (128 * 100);
 
 	init_device();
 
