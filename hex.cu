@@ -5,7 +5,7 @@
 
 using namespace std;
 
-//#define GPU
+#define GPU
 
 //
 // Define board game
@@ -62,7 +62,7 @@ struct BOARD {
 
 	__device__ __host__
 	void seed(int sd) {
-			randn = sd;
+		randn = sd;
 	}
 
 	__device__ __host__
@@ -133,9 +133,8 @@ U32 BOARD::playout(const BOARD& b) {
 #define nThreads  32
 #define nBlocks   112
 #define TT_SIZE   4194304
-#define UCTK      0.44
-#define FPU       10000
-//1.10
+#define UCTK      0.44f
+#define FPU       1.10f
 
 //
 // Lock
@@ -152,15 +151,17 @@ U32 BOARD::playout(const BOARD& b) {
 //
 
 struct Node {
+	MOVE move;
 	U32 uct_wins;
 	U32 uct_visits;
-	MOVE move;
 	Node* parent;
 	Node* child;
 	Node* next;
 	LOCK lock;
+	U32 workers;
 	
-	__device__ void clear() {
+	__device__ __host__
+	void clear() {
 		uct_wins = 0;
 		uct_visits = 0;
 		parent = 0;
@@ -168,6 +169,7 @@ struct Node {
 		next = 0;
 		move = MOVE();
 		l_create(lock);
+		workers = 0;
 	}
 };
 
@@ -203,7 +205,7 @@ namespace TABLE {
 	}
 
 	__global__ void print_tree(int depthLimit) {
-		int depth = 0;
+		int depth = 0,width;
 		Node* current = root_node;
 		while(current) {
 			while(current) {
@@ -211,8 +213,9 @@ namespace TABLE {
 					if(current->uct_visits) {
 						for(int i = 0;i < depth;i++)
 							cuPrintf("\t");
-						cuPrintf("%d. %d %d %.6f\n",
-							depth,current->uct_wins,current->uct_visits,
+						width = current->parent ? (current - current->parent->child) : 0;
+						cuPrintf("%d.%d %d %d %.6f\n",
+							depth,width,current->uct_wins,current->uct_visits,
 							float(current->uct_wins) / current->uct_visits
 							);
 					}
@@ -272,7 +275,7 @@ namespace TABLE {
 				value = UCTK * sqrtf(logn / (current->uct_visits + 1))
 					+ (current->uct_wins + 1) / (current->uct_visits + 1);
 			} else {
-				value = FPU;
+				value = FPU - (current->workers / 32.f);
 			}
 			if(value > bvalue) {
 				bvalue = value;
@@ -334,6 +337,8 @@ void playout(int N) {
 					n = next;
 				}
 			}
+
+			atomicAdd(&n->workers,1);
 		}
 		b.copy(sb);
 		__syncthreads();
@@ -364,6 +369,7 @@ void playout(int N) {
 				current->uct_wins += score;
 				current->uct_visits += nLoop * nThreads;
 				l_unlock(current->lock);
+				atomicSub(&current->workers,1);
 				score = nLoop * nThreads - score;
 				current = current->parent;
 			}
@@ -490,7 +496,7 @@ void print_bitboard(U64 b){
 
 int main() {
 	const U32 nSimulations = 
-		8 * 14 * 256 * 1600; 
+		(8 * 14) * (32) * (128 * 8);
 
 	init_device();
 
