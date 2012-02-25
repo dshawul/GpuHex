@@ -79,21 +79,38 @@ namespace TABLE {
 		root_node = get_node();
 	}
 
-	__global__ void printTree() {
-		int i = 0;
-		Node* current = root_node->child;
+	__global__ void printTree(int depthLimit) {
+		int depth = 0;
+		Node* current = root_node;
 		while(current) {
-			i++;
-			cuPrintf("%d. %d %d %.6f\n",
-				i,current->uct_wins,current->uct_visits,
-				float(current->uct_wins) / current->uct_visits
-				);
-			current = current->next;
+			while(current) {
+				while(current) {
+					if(current->uct_visits) {
+						for(int i = 0;i < depth;i++)
+							cuPrintf("\t");
+						cuPrintf("%d. %d %d %.6f\n",
+							depth,current->uct_wins,current->uct_visits,
+							float(current->uct_wins) / current->uct_visits
+							);
+					}
+					//child
+					if(current->child && depth < depthLimit) {
+						depth++;
+						current = current->child;
+					} else break;
+				}
+				//sibling
+				if(current->next) {
+					current = current->next;
+				} else break;
+			}
+			//parent
+			if(current->parent) {
+				depth--;
+				current = current->parent->next;
+			} else break;
 		}
-		current = root_node;
-		cuPrintf("Total %d %d %.6f\n",current->uct_wins,current->uct_visits,
-				float(current->uct_wins) / current->uct_visits
-				);
+
 		cuPrintf("Total nodes in tree: %d\n",head - mem_);
 	}
 
@@ -346,7 +363,7 @@ void simulate(BOARD* b,U32 N) {
 
 	TABLE::reset <<<1,1>>> ();
 	playout <<<nBlocks,nThreads>>> (N); 
-	TABLE::printTree <<<1,1>>> ();
+	TABLE::printTree <<<1,1>>> (1);
 
     cudaPrintfDisplay();
 	printf("Errors: %s\n", 
