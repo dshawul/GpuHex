@@ -20,8 +20,8 @@
 #	define nBlocks   14
 #	define nLoop     16
 #else
-#	define nThreads  2
-#	define nBlocks   128
+#	define nThreads  1
+#	define nBlocks   4
 #	define nLoop     16
 #endif
 #define TT_SIZE   4194304
@@ -337,7 +337,7 @@ namespace TABLE {
 				value = FPU;
 			}
 
-			value -= (current->workers / float(nBlocks));
+			value -= (current->workers / 128.f);
 
 			if(value > bvalue) {
 				bvalue = value;
@@ -374,97 +374,108 @@ namespace TABLE {
 //
 __global__ 
 void playout(U32 N) {
-	__shared__ U32 cache[nThreads];
-	__shared__ BOARD sb;
-	__shared__ Node* n;
-	__shared__ bool finished;
-
-	//
-	//local board : allocated on register
-	//
 #ifdef GPU
 	{
-		BOARD b;
-		int threadId = threadIdx.x;
-		int blockD = blockDim.x;
-		b.seed(blockIdx.x * blockDim.x + threadIdx.x + 1);
+#else
+	omp_set_nested(1);
+	omp_set_dynamic(0);
+#pragma omp parallel num_threads(nBlocks)
+	{
+		int blockId = omp_get_thread_num();
+		printf("Block %d\n",blockId);
+#endif
+		//
+		//shared data with in a block
+		//
+		__shared__ U32 cache[nThreads];
+		__shared__ BOARD sb;
+		__shared__ Node* n;
+		__shared__ bool finished;
+
+		//
+		//local board : allocated on register
+		//
+#ifdef GPU
+		{
+			BOARD b;
+			int threadId = threadIdx.x;
+			b.seed(blockIdx.x * blockDim.x + threadIdx.x + 1);
 #else
 #pragma omp parallel num_threads(nThreads)
-	{
-		BOARD b;
-		int threadId = omp_get_thread_num();
-		int blockD = omp_get_num_threads();
-		b.seed(threadId);
-		print("Thread %d\n",threadId);
+		{
+			BOARD b;
+			int threadId = omp_get_thread_num();
+			b.seed(threadId);
+			print("Thread %d / %d of block %d\n",threadId,nThreads,blockId);
 #endif
+			//
+			//loop forever
+			//
+			while(true) {
 
-		//
-		//loop forever
-		//
-		while(true) {
+				//get node
+				if(threadId == 0) {
+					finished = false;
+					n = TABLE::root_node;
+					sb.copy(TABLE::root_board);
 
-			//get node
-			if(threadId == 0) {
-				finished = false;
-				n = TABLE::root_node;
-				sb.copy(TABLE::root_board);
-
-				while(n->child) {
-					n = TABLE::UCT_select(n);
-					sb.do_move(n->move);
-				}
-
-				if(n->uct_visits) {
-					TABLE::create_children(&sb,n);
-					Node* next = TABLE::UCT_select(n);
-					if(next) {
-						sb.do_move(next->move);
-						n = next;
+					while(n->child) {
+						n = TABLE::UCT_select(n);
+						sb.do_move(n->move);
 					}
+
+					if(n->uct_visits) {
+						TABLE::create_children(&sb,n);
+						Node* next = TABLE::UCT_select(n);
+						if(next) {
+							sb.do_move(next->move);
+							n = next;
+						}
+					}
+
+					l_add(n->workers,1);
 				}
-
-				l_add(n->workers,1);
-			}
-			l_barrier();
-			b.copy(sb);
-
-			//playout the position
-			cache[threadId] = b.playout(sb);
-
-			//reduction : works for power of 2 block size
-			l_barrier();
-			int i = blockD / 2;
-			while (i != 0) {
-				if (threadId < i)
-					cache[threadId] += cache[threadId + i];
 				l_barrier();
-				i /= 2;
-			}
+				b.copy(sb);
 
-			//update result
-			if (threadId == 0) {
-				l_sub(n->workers,1);
+				//playout the position
+				cache[threadId] = b.playout(sb);
 
-				U32 score;
-				if(sb.player == 0) 
-					score = cache[0];
-				else
-					score = nLoop * nThreads - cache[0];
-				Node* current = n;
-				while(current) {
-					l_lock(current->lock);
-					current->uct_wins += score;
-					current->uct_visits += nLoop * nThreads;
-					l_unlock(current->lock);
-					score = nLoop * nThreads - score;
-					current = current->parent;
+				//reduction : works for power of 2 block size
+				l_barrier();
+				int i = nThreads / 2;
+				while (i != 0) {
+					if (threadId < i)
+						cache[threadId] += cache[threadId + i];
+					l_barrier();
+					i /= 2;
 				}
-				if(TABLE::root_node->uct_visits >= N)
-					finished = true;
+
+				//update result
+				if (threadId == 0) {
+					l_sub(n->workers,1);
+
+					U32 score;
+					if(sb.player == 0) 
+						score = cache[0];
+					else
+						score = nLoop * nThreads - cache[0];
+					Node* current = n;
+					while(current) {
+						l_lock(current->lock);
+						current->uct_wins += score;
+						current->uct_visits += nLoop * nThreads;
+						l_unlock(current->lock);
+						score = nLoop * nThreads - score;
+						current = current->parent;
+					}
+					if(TABLE::root_node->uct_visits >= N)
+						finished = true;
+				}
+				l_barrier();
+				if(finished)
+					break;
 			}
-			l_barrier();
-			if(finished)
-				break;
 		}
 	}
 }
@@ -482,8 +493,8 @@ void simulate(BOARD* b,U32 N) {
 	TABLE::reset <<<1,1>>> ();
 	playout <<<nBlocks,nThreads>>> (N); 
 	TABLE::print_tree <<<1,1>>> (1);
-
-    cudaPrintfDisplay();
+	
+	cudaPrintfDisplay();
 	printf("Errors: %s\n", 
 		cudaGetErrorString(cudaPeekAtLastError()));
 }
@@ -535,7 +546,7 @@ void init_device() {
 
 	printf("nBlocks=%d X nThreads=%d\n",nBlocks,nThreads);
 	cudaPrintfInit();
-    TABLE::allocate(TT_SIZE);
+	TABLE::allocate(TT_SIZE);
 }
 __host__ 
 void finalize_device() {
@@ -589,16 +600,17 @@ void print_bitboard(U64 b){
 }
 
 int main() {
-	const U32 nSimulations = 
-		nBlocks * nThreads * (128 * 100);
-
 	init_device();
 
 	BOARD b;
 	b.clear();
-    clock_t start,end;
+	clock_t start,end;
 	start = clock();
-	simulate(&b,nSimulations);
+#ifdef GPU
+	simulate(&b,nBlocks * nThreads * 128 * 100);
+#else
+	simulate(&b,128 * 4 * 128 * 100);
+#endif
 	end = clock();
 	printf("time %d\n",end - start);
 
