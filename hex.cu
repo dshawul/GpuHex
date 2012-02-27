@@ -1,21 +1,102 @@
-#include <cuda.h>
+
+//#define GPU __CUDACC__
+
 #include <string>
-#include <ctime>
+#include <cstdarg>
 #include <cstdio>
+#ifdef GPU
+#	include <cuda.h>
+#else
+#	include <omp.h>
+#	include <math.h>
+#	include <ctime>
+#endif
 
-using namespace std;
+//
+// parameters
+//
+#ifdef GPU
+#	define nThreads  256
+#	define nBlocks   14
+#	define nLoop     16
+#else
+#	define nThreads  4
+#	define nBlocks   4
+#	define nLoop     16
+#endif
+#define TT_SIZE   4194304
+#define UCTK      0.44f
+#define FPU       1.10f
 
-#define GPU
+//
+// locks
+//
+
+#ifdef GPU
+#	define LOCK          int
+#	define l_create(x)   ((x) = 0)
+#	define l_trylock(x)  (atomicExch(&(x),1))
+#	define l_lock(x)     while(l_trylock(x) != 0);
+#	define l_unlock(x)   (atomicExch(&(x),0))
+#	define l_add(x,v)	 (atomicAdd(&x,v))
+#	define l_sub(x,v)	 (atomicSub(&x,v))
+#	define l_barrier()   __syncthreads()
+#else
+#	define LOCK          omp_lock_t
+#	define l_create(x)   omp_init_lock(&x)
+#	define l_trylock(x)  omp_test_lock(&x)
+#	define l_lock(x)     omp_set_lock(&x)
+#	define l_unlock(x)   omp_unset_lock(&x)   
+template <class T>
+inline void l_add(T x,T v) { 
+	#pragma omp atomic 
+		x+=v;
+}
+template <class T>
+inline void l_sub(T x,T v) { 
+	#pragma omp atomic 
+		x-=v;
+}
+inline void l_barrier() { 
+	#pragma omp barrier 
+}
+#endif
+
+//
+// printf
+//
+#ifdef GPU
+#	include "cuPrintf.cu"
+#	define print(format, ...) cuPrintf(format, __VA_ARGS__)
+#else
+#	define print(format, ...) printf(format, __VA_ARGS__)
+#endif
+
+//
+// undef cuda specific code
+//
+#ifndef GPU
+#	undef  __host__
+#	undef  __device__
+#   undef  __global__
+#   undef  __shared__
+#	define __host__
+#	define __device__
+#	define __global__
+#   define __shared__
+#endif
+
+//
+// types
+//
+typedef unsigned __int64 U64;
+typedef unsigned int U32;
+#define U64(x) (x##ui64)
 
 //
 // Define board game
 //
-
-typedef unsigned __int64 U64;
-typedef unsigned int U32;
 typedef U64 MOVE;
-
-#define UINT64(x) (x##ui64)
 
 struct BOARD {
 	U64 wpawns;
@@ -31,7 +112,7 @@ struct BOARD {
 	__device__ __host__
 	void clear() {
 		wpawns = 0;
-		all = UINT64(0xffffffffffffffff);
+		all = U64(0xffffffffffffffff);
 		emptyc = 64;
 		player = 0;
 	}
@@ -91,22 +172,20 @@ void BOARD::make_random_move() {
 
 __device__ __host__
 bool BOARD::is_white_win() {
-	U64 m = (wpawns & UINT64(0x00000000000000ff)),oldm;
+	U64 m = (wpawns & U64(0x00000000000000ff)),oldm;
 	do {
 		oldm = m;
 		m |=((((m << 8) | (m >> 8)) | 
-			 (((m << 9) | (m << 1)) & UINT64(0xfefefefefefefefe)) | 
-			 (((m >> 9) | (m >> 1)) & UINT64(0x7f7f7f7f7f7f7f7f))) 
+			 (((m << 9) | (m << 1)) & U64(0xfefefefefefefefe)) | 
+			 (((m >> 9) | (m >> 1)) & U64(0x7f7f7f7f7f7f7f7f))) 
 			 & wpawns
 			);
-		if(m & UINT64(0xff00000000000000)) {
+		if(m & U64(0xff00000000000000)) {
 			return true;
 		}
 	} while(m != oldm);
 	return false;
 }
-
-#define nLoop     64
 
 __device__ __host__
 U32 BOARD::playout(const BOARD& b) {
@@ -124,31 +203,7 @@ U32 BOARD::playout(const BOARD& b) {
 }
 
 //
-// GPU specific code
-//
-
-#ifdef GPU
-
-#include "cuPrintf.cu"
-
-#define nThreads  32
-#define nBlocks   112
-#define TT_SIZE   4194304
-#define UCTK      0.44f
-#define FPU       1.10f
-
-//
-// Lock
-//
-
-#define LOCK          int
-#define l_create(x)   ((x) = 0)
-#define l_trylock(x)  (atomicExch(&(x),1))
-#define l_lock(x)     while(l_trylock(x) != 0);
-#define l_unlock(x)   (atomicExch(&(x),0))
-
-//
-// Node and table
+// Node
 //
 
 struct Node {
@@ -159,7 +214,7 @@ struct Node {
 	Node* child;
 	Node* next;
 	LOCK lock;
-	U32 workers;
+	int workers;
 	
 	__device__ __host__
 	void clear() {
@@ -174,12 +229,16 @@ struct Node {
 	}
 };
 
+//
+// Table
+//
+
 namespace TABLE {
 	__device__ int size;
 	__device__ int tsize;
 	__device__ Node* head;
 	__device__ Node* mem_;
-	__device__ LOCK lock = 0;
+	__device__ LOCK lock;
 	__device__ BOARD root_board;
 	__device__ Node* root_node;
 	Node* hmem_;
@@ -213,9 +272,9 @@ namespace TABLE {
 				while(current) {
 					if(current->uct_visits) {
 						for(int i = 0;i < depth;i++)
-							cuPrintf("\t");
+							print("\t");
 						width = current->parent ? (current - current->parent->child) : 0;
-						cuPrintf("%d.%d %d %d %.6f\n",
+						print("%d.%d %d %d %.6f\n",
 							depth,width,current->uct_wins,current->uct_visits,
 							float(current->uct_wins) / current->uct_visits
 							);
@@ -235,7 +294,7 @@ namespace TABLE {
 			} else break;
 		}
 
-		cuPrintf("Total nodes in tree: %d\n",head - mem_);
+		print("Total nodes in tree: %d\n",head - mem_);
 	}
 
 	__device__ void create_children(BOARD* b,Node* n) {
@@ -276,8 +335,11 @@ namespace TABLE {
 				value = UCTK * sqrtf(logn / (current->uct_visits + 1))
 					+ (current->uct_wins + 1) / (current->uct_visits + 1);
 			} else {
-				value = FPU - (current->workers / float(nBlocks));
+				value = FPU;
 			}
+
+			value -= (current->workers / float(nBlocks));
+
 			if(value > bvalue) {
 				bvalue = value;
 				bnode = current;
@@ -288,105 +350,129 @@ namespace TABLE {
 	}
 
 	__host__ void allocate(int N) {
+#ifdef GPU
 		cudaMalloc((void**) &hmem_,N * sizeof(Node));
 		cudaMemcpyToSymbol(tsize,&N,sizeof(int),0,cudaMemcpyHostToDevice);
 		cudaMemcpyToSymbol(mem_,&hmem_,sizeof(Node*),0,cudaMemcpyHostToDevice);
+#else
+		l_create(lock);
+		hmem_ = (Node*) malloc(N * sizeof(Node));
+		tsize = N;
+		mem_ = hmem_;
+#endif
 	}
 	__host__ void release() {
+#ifdef GPU
 		cudaFree(hmem_);
+#else
+		free(hmem_);
+#endif
 	}
 }
 
 //
-// Global code
+// playout
 //
-
 __global__ 
-void playout(int N) {
-
+void playout(U32 N) {
 	__shared__ U32 cache[nThreads];
 	__shared__ BOARD sb;
 	__shared__ Node* n;
 	__shared__ bool finished;
-	int threadId = threadIdx.x;
-	finished = false;
-
-	//local board
-	BOARD b;
-	b.seed(blockIdx.x * blockDim.x + threadIdx.x + 1);
 
 	//
-	//loop forever
+	//local board : allocated on register
 	//
-	while(true) {
+#ifdef GPU
+	{
+		BOARD b;
+		int threadId = threadIdx.x;
+		int blockD = blockDim.x;
+		b.seed(blockIdx.x * blockDim.x + threadIdx.x + 1);
+#else
+#pragma omp parallel
+	{
+		BOARD b;
+		int threadId = omp_get_thread_num();
+		int blockD = omp_get_num_threads();
+		b.seed(threadId);
+#endif
 
-		//get node
-		if(threadId == 0) {
-			n = TABLE::root_node;
-			sb.copy(TABLE::root_board);
-			
-			while(n->child) {
-				n = TABLE::UCT_select(n);
-				sb.do_move(n->move);
-			}
+		//
+		//loop forever
+		//
+		while(true) {
 
-			if(n->uct_visits) {
-				TABLE::create_children(&sb,n);
-				Node* next = TABLE::UCT_select(n);
-				if(next) {
-					sb.do_move(next->move);
-					n = next;
+			//get node
+			if(threadId == 0) {
+				finished = false;
+				n = TABLE::root_node;
+				sb.copy(TABLE::root_board);
+
+				while(n->child) {
+					n = TABLE::UCT_select(n);
+					sb.do_move(n->move);
 				}
+
+				if(n->uct_visits) {
+					TABLE::create_children(&sb,n);
+					Node* next = TABLE::UCT_select(n);
+					if(next) {
+						sb.do_move(next->move);
+						n = next;
+					}
+				}
+
+				l_add(n->workers,1);
+			}
+			l_barrier();
+			b.copy(sb);
+
+			//playout the position
+			cache[threadId] = b.playout(sb);
+
+			//reduction : works for power of 2 block size
+			l_barrier();
+			int i = blockD / 2;
+			while (i != 0) {
+				if (threadId < i)
+					cache[threadId] += cache[threadId + i];
+				l_barrier();
+				i /= 2;
 			}
 
-			atomicAdd(&n->workers,1);
-		}
-		b.copy(sb);
-		__syncthreads();
+			//update result
+			if (threadId == 0) {
+				l_sub(n->workers,1);
 
-		//playout the position
-		cache[threadId] = b.playout(sb);
-
-		//reduction : works for power of 2 block size
-		__syncthreads();
-		int i = blockDim.x / 2;
-		while (i != 0) {
-			if (threadId < i)
-				cache[threadId] += cache[threadId + i];
-			__syncthreads();
-			i /= 2;
-		}
-
-		//update result
-		if (threadId == 0) {
-			atomicSub(&n->workers,1);
-
-			U32 score;
-			if(sb.player == 0) 
-				score = cache[0];
-			else
-				score = nLoop * nThreads - cache[0];
-			Node* current = n;
-			while(current) {
-				l_lock(current->lock);
-				current->uct_wins += score;
-				current->uct_visits += nLoop * nThreads;
-				l_unlock(current->lock);
-				score = nLoop * nThreads - score;
-				current = current->parent;
+				U32 score;
+				if(sb.player == 0) 
+					score = cache[0];
+				else
+					score = nLoop * nThreads - cache[0];
+				Node* current = n;
+				while(current) {
+					l_lock(current->lock);
+					current->uct_wins += score;
+					current->uct_visits += nLoop * nThreads;
+					l_unlock(current->lock);
+					score = nLoop * nThreads - score;
+					current = current->parent;
+				}
+				if(TABLE::root_node->uct_visits >= N)
+					finished = true;
 			}
-			if(TABLE::root_node->uct_visits >= N)
-				finished = true;
+			l_barrier();
+			if(finished)
+				break;
 		}
-		__syncthreads();
-		if(finished)
-			break;
 	}
 }
+//
+// GPU specific code
+//
 
-//
-// Host code
-//
+#ifdef GPU
 
 __host__ 
 void simulate(BOARD* b,U32 N) {
@@ -395,7 +481,7 @@ void simulate(BOARD* b,U32 N) {
 
 	TABLE::reset <<<1,1>>> ();
 	playout <<<nBlocks,nThreads>>> (N); 
-	TABLE::print_tree <<<1,1>>> (12);
+	TABLE::print_tree <<<1,1>>> (1);
 
     cudaPrintfDisplay();
 	printf("Errors: %s\n", 
@@ -447,41 +533,47 @@ void init_device() {
 		printf( "\n" );
 	}
 
-	//init table & cuPrintf
 	printf("nBlocks=%d X nThreads=%d\n",nBlocks,nThreads);
 	cudaPrintfInit();
     TABLE::allocate(TT_SIZE);
 }
 __host__ 
 void finalize_device() {
-
-	//finalize
 	cudaPrintfEnd();
 	TABLE::release();
 }
 
 #else
+
+//
+// Cpu specific code
+//
+
 __host__
-void simulate(BOARD* b,U32 N) {
-	BOARD sb;
-	sb.copy(*b);
-	b->seed(0);
-	U32 wins = 0;
-	for(U32 i = 0;i < N;i += nLoop)
-		wins += b->playout(sb);
-	printf("%u %u %.6f\n",wins,N,float(wins)/N);
+void simulate(BOARD* bo,U32 N) {
+	TABLE::root_board = *bo;
+	TABLE::reset();
+	playout(N);
+	TABLE::print_tree(1);
 }
 __host__
 void init_device() {
+	TABLE::allocate(TT_SIZE);
 }
 __host__
 void finalize_device() {
+	TABLE::release();
 }
+
 #endif
+
+//
+// common code
+//
 
 __host__
 void print_bitboard(U64 b){
-	string s = "";
+	std::string s = "";
 	for(int i=7;i>=0;i--) {
 		for(int z = 0; z < i;z++)
 			s += "  ";

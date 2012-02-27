@@ -35,7 +35,7 @@
 			<Tool
 				Name="Cudart Build Rule"
 				GPUDebugInfo="false"
-				NvccCompilation="3"
+				NvccCompilation="0"
 				CompileOut="$(IntDir)/$(InputFileName).obj"
 				Arch1="11"
 				Arch2="0"
@@ -118,6 +118,8 @@
 			<Tool
 				Name="Cudart Build Rule"
 				NvccCompilation="0"
+				Arch1="11"
+				Arch2="0"
 			/>
 			<Tool
 				Name="VCXMLDataGeneratorTool"
@@ -135,6 +137,7 @@
 				PreprocessorDefinitions="WIN32;NDEBUG;_CONSOLE"
 				RuntimeLibrary="2"
 				EnableFunctionLevelLinking="true"
+				OpenMP="true"
 				UsePrecompiledHeader="0"
 				WarningLevel="3"
 				DebugInformationFormat="3"
@@ -178,6 +181,7 @@
 			/>
 			<Tool
 				Name="VCPostBuildEventTool"
+				CommandLine=""
 			/>
 		</Configuration>
 	</Configurations>
@@ -192,16 +196,6 @@
 			<File
 				RelativePath=".\hex.cu"
 				>
-				<FileConfiguration
-					Name="Debug|Win32"
-					>
-					<Tool
-						Name="Cudart Build Rule"
-						NvccCompilation="0"
-						Arch1="11"
-						Arch2="0"
-					/>
-				</FileConfiguration>
 			</File>
 		</Filter>
 		<Filter
