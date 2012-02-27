@@ -2,8 +2,6 @@
 #define GPU __CUDACC__
 
 #include <string>
-#include <cstdarg>
-#include <cstdio>
 #ifdef GPU
 #	include <cuda.h>
 #else
@@ -16,13 +14,13 @@
 // parameters
 //
 #ifdef GPU
-#	define nThreads  256
-#	define nBlocks   14
-#	define nLoop     16
+#	define nThreads  448
+#	define nBlocks    14
+#	define nLoop      16
 #else
-#	define nThreads  1
-#	define nBlocks   4
-#	define nLoop     16
+#	define nThreads    1
+#	define nBlocks     1
+#	define nLoop      16
 #endif
 #define TT_SIZE   4194304
 #define UCTK      0.44f
@@ -170,7 +168,7 @@ void BOARD::make_random_move() {
 }
 
 __device__ __host__
-bool BOARD::is_white_win() {
+bool BOARD::is_white_win(){
 	U64 m = (wpawns & U64(0x00000000000000ff)),oldm;
 	do {
 		oldm = m;
@@ -374,15 +372,16 @@ namespace TABLE {
 //
 __global__ 
 void playout(U32 N) {
+	//
+	// create blocks
+	//
 #ifdef GPU
 	{
+		const int blockId = blockIdx.x;
 #else
-	omp_set_nested(1);
-	omp_set_dynamic(0);
 #pragma omp parallel num_threads(nBlocks)
 	{
-		int blockId = omp_get_thread_num();
-		printf("Block %d\n",blockId);
+		const int blockId = omp_get_thread_num();
 #endif
 		//
 		//shared data with in a block
@@ -393,21 +392,20 @@ void playout(U32 N) {
 		__shared__ bool finished;
 
 		//
-		//local board : allocated on register
+		// create threads and allocate a BOARD on register
 		//
 #ifdef GPU
 		{
-			BOARD b;
-			int threadId = threadIdx.x;
-			b.seed(blockIdx.x * blockDim.x + threadIdx.x + 1);
+			const int threadId = threadIdx.x;
 #else
 #pragma omp parallel num_threads(nThreads)
 		{
-			BOARD b;
-			int threadId = omp_get_thread_num();
-			b.seed(threadId);
-			print("Thread %d / %d of block %d\n",threadId,nThreads,blockId);
+			const int threadId = omp_get_thread_num();
+			print("Block %d : Thread %d of %d\n",
+				blockId,threadId,nThreads);
 #endif
+			BOARD b;
+			b.seed(blockId * nBlocks + threadId);
 			//
 			//loop forever
 			//
@@ -441,14 +439,17 @@ void playout(U32 N) {
 				//playout the position
 				cache[threadId] = b.playout(sb);
 
-				//reduction : works for power of 2 block size
+				//reduction 
 				l_barrier();
-				int i = nThreads / 2;
+				int p = nThreads;
+				int i = (p + 1) / 2;
 				while (i != 0) {
-					if (threadId < i)
+					if ((threadId < i) && (threadId + i < p))
 						cache[threadId] += cache[threadId + i];
 					l_barrier();
-					i /= 2;
+					p = i;
+					if(p > 1) i = (p + 1) / 2;
+					else i = p / 2;
 				}
 
 				//update result
@@ -476,6 +477,9 @@ void playout(U32 N) {
 				if(finished)
 					break;
 			}
+			//
+			// end of work
+			//
 		}
 	}
 }
@@ -569,6 +573,8 @@ void simulate(BOARD* bo,U32 N) {
 }
 __host__
 void init_device() {
+	omp_set_nested(1);
+	omp_set_dynamic(0);
 	TABLE::allocate(TT_SIZE);
 }
 __host__
@@ -606,11 +612,7 @@ int main() {
 	b.clear();
 	clock_t start,end;
 	start = clock();
-#ifdef GPU
-	simulate(&b,nBlocks * nThreads * 128 * 100);
-#else
-	simulate(&b,128 * 4 * 128 * 100);
-#endif
+	simulate(&b,128 * 28 * 128 * 100);
 	end = clock();
 	printf("time %d\n",end - start);
 
