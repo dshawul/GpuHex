@@ -1,5 +1,5 @@
 
-//#define GPU __CUDACC__
+#define GPU __CUDACC__
 
 #include <string>
 #include <cstdarg>
@@ -20,8 +20,8 @@
 #	define nBlocks   14
 #	define nLoop     16
 #else
-#	define nThreads  4
-#	define nBlocks   4
+#	define nThreads  2
+#	define nBlocks   128
 #	define nLoop     16
 #endif
 #define TT_SIZE   4194304
@@ -29,9 +29,18 @@
 #define FPU       1.10f
 
 //
+// printf
+//
+#ifdef GPU
+#	include "cuPrintf.cu"
+#	define print(format, ...) cuPrintf(format, __VA_ARGS__)
+#else
+#	define print(format, ...) printf(format, __VA_ARGS__)
+#endif
+
+//
 // locks
 //
-
 #ifdef GPU
 #	define LOCK          int
 #	define l_create(x)   ((x) = 0)
@@ -60,16 +69,6 @@ inline void l_sub(T x,T v) {
 inline void l_barrier() { 
 	#pragma omp barrier 
 }
-#endif
-
-//
-// printf
-//
-#ifdef GPU
-#	include "cuPrintf.cu"
-#	define print(format, ...) cuPrintf(format, __VA_ARGS__)
-#else
-#	define print(format, ...) printf(format, __VA_ARGS__)
 #endif
 
 //
@@ -390,12 +389,13 @@ void playout(U32 N) {
 		int blockD = blockDim.x;
 		b.seed(blockIdx.x * blockDim.x + threadIdx.x + 1);
 #else
-#pragma omp parallel
+#pragma omp parallel num_threads(nThreads)
 	{
 		BOARD b;
 		int threadId = omp_get_thread_num();
 		int blockD = omp_get_num_threads();
 		b.seed(threadId);
+		print("Thread %d\n",threadId);
 #endif
 
 		//
