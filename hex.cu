@@ -14,9 +14,9 @@
 // parameters
 //
 #ifdef GPU
-#	define nThreads  448
-#	define nBlocks    14
-#	define nLoop      16
+#	define nThreads   64
+#	define nBlocks    84
+#	define nLoop       4
 #else
 #	define nThreads    1
 #	define nBlocks     1
@@ -261,13 +261,24 @@ namespace TABLE {
 		root_node = get_node();
 	}
 
+	int count_nodes(Node* root) {
+		int count = 1;
+		Node* current = root->child;
+		while(current) {
+			count += count_nodes(current);
+			current = current->next;
+		}
+		return count;
+	}
 	__global__ void print_tree(int depthLimit) {
-		int depth = 0,width;
+		int depth = 0,max_depth = 0,average_depth = 0;
+		int width = 0,leaf_nodes = 0,total_nodes = 0;
 		Node* current = root_node;
 		while(current) {
 			while(current) {
 				while(current) {
-					if(current->uct_visits) {
+
+					if(current->uct_visits && depth <= depthLimit) {
 						for(int i = 0;i < depth;i++)
 							print("\t");
 						width = current->parent ? (current - current->parent->child) : 0;
@@ -276,22 +287,36 @@ namespace TABLE {
 							float(current->uct_wins) / current->uct_visits
 							);
 					}
-					if(current->child && depth < depthLimit) {
+
+					total_nodes++;
+					if(current->child) {
 						depth++;
 						current = current->child;
-					} else break;
+					} else {
+						if(depth > max_depth)
+							max_depth = depth;
+						average_depth += depth;
+						leaf_nodes++;
+						break;
+					}
 				}
+NEXT:
 				if(current->next) {
 					current = current->next;
 				} else break;
 			}
 			if(current->parent) {
 				depth--;
-				current = current->parent->next;
-			} else break;
+				current = current->parent;
+				goto NEXT;
+			} else {
+				break;
+			}
 		}
-
-		print("Total nodes in tree: %d\n",head - mem_);
+		print("Total nodes   : %d\n",total_nodes);
+		print("Leaf  nodes   : %d\n",leaf_nodes);
+		print("Maximum depth : %d\n",max_depth);
+		print("Average depth : %.2f\n",average_depth / float(leaf_nodes));
 	}
 
 	__device__ void create_children(BOARD* b,Node* n) {
@@ -306,7 +331,7 @@ namespace TABLE {
 		U64 lsb;
 		while(m) {
 			lsb = m & -m;
-
+		
 			Node* node = get_node();
 			if(!node) break;
 			node->move = lsb;
