@@ -16,7 +16,7 @@
 #ifdef GPU
 #	define nThreads   64
 #	define nBlocks    84
-#	define nLoop       4
+#	define nLoop      16
 #else
 #	define nThreads    1
 #	define nBlocks     1
@@ -77,21 +77,37 @@ inline void l_barrier() {
 #	undef  __device__
 #   undef  __global__
 #   undef  __shared__
+#   undef  __constant__
 #	define __host__
 #	define __device__
 #	define __global__
 #   define __shared__
+#   define __constant__
+#if defined (__GNUC__)
+#	define __align__(x)  __attribute__ ((aligned(x)))
+#else
+#	define __align__(x) __declspec(align(x))
+#endif
 #endif
 
 //
 // types
 //
-typedef unsigned __int64 U64;
-typedef unsigned int U32;
-#define U64(x) (x##ui64)
+#ifdef _MSC_VER
+	typedef unsigned __int64 U64;
+	typedef unsigned int U32;
+#	define U64(x) (x##ui64)
+#	define FMTU64 "0x%016I64x"
+#else
+#   include <inttypes.h>
+	typedef uint64_t U64;
+	typedef uint32_t U32;
+#	define U64(x) (x##ull)
+#	define FMTU64 "0x%016llx"
+#endif
 
 //
-// Define board game
+// define board game
 //
 typedef U64 MOVE;
 
@@ -125,17 +141,10 @@ struct BOARD {
 	__device__ __host__
 	void do_move(const MOVE& move) {
 		all ^= move;
-		wpawns ^= move;
+		if(player == 0)
+			wpawns ^= move;
 		player ^= 1;
 		emptyc--;
-	}
-
-	__device__ __host__
-	void undo_move(const MOVE& move) {
-		all ^= move;
-		wpawns ^= move;
-		player ^= 1;
-		emptyc++;
 	}
 
 	__device__ __host__
@@ -148,6 +157,13 @@ struct BOARD {
 		randn *= 214013;
 		randn += 2531011;
 		return ((randn >> 16) & 0x7fff);
+	}
+
+	__device__ __host__
+	U64 rand64() {
+		return((U64)rand()) ^ 
+			  ((U64)rand() << 15) ^ ((U64)rand() << 30) ^
+			  ((U64)rand() << 45) ^ ((U64)rand() << 60);
 	}
 };
 
@@ -199,6 +215,43 @@ U32 BOARD::playout(const BOARD& b) {
 	return wins;
 }
 
+__constant__
+unsigned int index64[64];
+
+__device__ __host__
+unsigned int firstone(U64 bb) {
+	unsigned int folded;
+	bb ^= bb - 1;
+	folded = (int) bb ^ (bb >> 32);
+	return index64[folded * 0x78291ACF >> 26];
+}
+
+//
+//sq to string and vice versa
+//
+#define file(x)          ((x) & 7)
+#define rank(x)          ((x) >> 3)
+#define SQ(x,y)          (((x) << 3) + (y))
+
+__device__ __host__
+char* sq_str(const int& sq,char* s) {
+	int f = file(sq);
+	int r = rank(sq);
+	*s++ = 'a' + (f);
+	*s++ = '1' + (r);
+	*s = 0;
+	return s;
+}
+
+__host__
+const char* str_sq(int& sq,const char* is) {
+	const char* s = is;
+	int f = tolower(*s++) - 'a';
+	int r = atoi(s++) - 1;
+	sq = SQ(r,f);
+	return s;
+}
+
 //
 // Node
 //
@@ -231,13 +284,13 @@ struct Node {
 //
 
 namespace TABLE {
-	__device__ int size;
-	__device__ int tsize;
-	__device__ Node* head;
 	__device__ Node* mem_;
-	__device__ LOCK lock;
+	__device__ int tsize;
 	__device__ BOARD root_board;
 	__device__ Node* root_node;
+	__device__ Node* head;
+	__device__ int size;
+	__device__ LOCK lock;
 	Node* hmem_;
 
 	__device__ Node* get_node() {
@@ -260,19 +313,12 @@ namespace TABLE {
 		size = tsize;
 		root_node = get_node();
 	}
-
-	int count_nodes(Node* root) {
-		int count = 1;
-		Node* current = root->child;
-		while(current) {
-			count += count_nodes(current);
-			current = current->next;
-		}
-		return count;
-	}
+	
 	__global__ void print_tree(int depthLimit) {
 		int depth = 0,max_depth = 0,average_depth = 0;
-		int width = 0,leaf_nodes = 0,total_nodes = 0;
+		int leaf_nodes = 0,total_nodes = 0;
+		char str[4];
+		int sq;
 		Node* current = root_node;
 		while(current) {
 			while(current) {
@@ -281,9 +327,11 @@ namespace TABLE {
 					if(current->uct_visits && depth <= depthLimit) {
 						for(int i = 0;i < depth;i++)
 							print("\t");
-						width = current->parent ? (current - current->parent->child) : 0;
-						print("%d.%d %d %d %.6f\n",
-							depth,width,current->uct_wins,current->uct_visits,
+						sq = firstone(current->move);
+						sq_str(sq,str);
+						print("%d.%s %d %d %.6f\n",
+							depth,(const char*)str,
+							current->uct_wins,current->uct_visits,
 							float(current->uct_wins) / current->uct_visits
 							);
 					}
@@ -313,12 +361,12 @@ NEXT:
 				break;
 			}
 		}
+
 		print("Total nodes   : %d\n",total_nodes);
 		print("Leaf  nodes   : %d\n",leaf_nodes);
 		print("Maximum depth : %d\n",max_depth);
 		print("Average depth : %.2f\n",average_depth / float(leaf_nodes));
 	}
-
 	__device__ void create_children(BOARD* b,Node* n) {
 		l_lock(n->lock);
 		if(n->child) {
@@ -351,11 +399,10 @@ NEXT:
 		Node* current = n->child;
 		float bvalue = -1.f,value;
 		float logn = logf(float(n->uct_visits + 1));
-
 		while(current) {
-			if(current->uct_visits > 0) {
+			if(current->uct_visits > 0) { 
 				value = UCTK * sqrtf(logn / (current->uct_visits + 1))
-					+ (current->uct_wins + 1) / (current->uct_visits + 1);
+					+ (current->uct_wins + 1) / (current->uct_visits + 1); 
 			} else {
 				value = FPU;
 			}
@@ -372,15 +419,27 @@ NEXT:
 	}
 
 	__host__ void allocate(int N) {
+		static const unsigned int mindex64[64] = {
+			63, 30,  3, 32, 59, 14, 11, 33,
+			60, 24, 50,  9, 55, 19, 21, 34,
+			61, 29,  2, 53, 51, 23, 41, 18,
+			56, 28,  1, 43, 46, 27,  0, 35,
+			62, 31, 58,  4,  5, 49, 54,  6,
+			15, 52, 12, 40,  7, 42, 45, 16,
+			25, 57, 48, 13, 10, 39,  8, 44,
+			20, 47, 38, 22, 17, 37, 36, 26
+		};
 #ifdef GPU
 		cudaMalloc((void**) &hmem_,N * sizeof(Node));
-		cudaMemcpyToSymbol(tsize,&N,sizeof(int),0,cudaMemcpyHostToDevice);
-		cudaMemcpyToSymbol(mem_,&hmem_,sizeof(Node*),0,cudaMemcpyHostToDevice);
+		cudaMemcpyToSymbol(tsize,&N,sizeof(int));
+		cudaMemcpyToSymbol(mem_,&hmem_,sizeof(Node*));
+		cudaMemcpyToSymbol(index64,mindex64,sizeof(mindex64));
 #else
-		l_create(lock);
 		hmem_ = (Node*) malloc(N * sizeof(Node));
 		tsize = N;
 		mem_ = hmem_;
+		memcpy(index64,mindex64,sizeof(mindex64));
+		l_create(lock);
 #endif
 	}
 	__host__ void release() {
@@ -482,10 +541,11 @@ void playout(U32 N) {
 					l_sub(n->workers,1);
 
 					U32 score;
-					if(sb.player == 0) 
+					if(sb.player != 0) 
 						score = cache[0];
 					else
 						score = nLoop * nThreads - cache[0];
+						
 					Node* current = n;
 					while(current) {
 						l_lock(current->lock);
@@ -522,16 +582,13 @@ void simulate(BOARD* b,U32 N) {
 	TABLE::reset <<<1,1>>> ();
 	playout <<<nBlocks,nThreads>>> (N); 
 	TABLE::print_tree <<<1,1>>> (1);
-	
+
 	cudaPrintfDisplay();
 	printf("Errors: %s\n", 
 		cudaGetErrorString(cudaPeekAtLastError()));
 }
-
 __host__
 void init_device() {
-
-	//inspect device
 	int count;
 	cudaDeviceProp prop;
 	cudaGetDeviceCount( &count );
@@ -610,15 +667,15 @@ void finalize_device() {
 #endif
 
 //
-// common code
+// Test
 //
 
 __host__
-void print_bitboard(U64 b){
+void print_bitboard(U64 b) {
 	std::string s = "";
 	for(int i=7;i>=0;i--) {
-		for(int z = 0; z < i;z++)
-			s += "  ";
+		for(int z = 0; z < 7-i;z++)
+			s += " ";
 		for(int j=0;j<8;j++) {
 			U64 m = (((U64)1) << (i * 8 + j));
 			if(b & m) s += "1 ";
@@ -626,20 +683,51 @@ void print_bitboard(U64 b){
 		}
 		s += "\n";
 	}
-	s += "\n";
 	printf("%s",s.c_str());
+	printf("\n"FMTU64"\n\n",b);
 }
+
+static const char *const commands_recognized[] = {
+	"d",
+	"go",
+	"quit",
+	"help",
+	NULL
+};
 
 int main() {
 	init_device();
 
 	BOARD b;
 	b.clear();
-	clock_t start,end;
-	start = clock();
-	simulate(&b,128 * 28 * 128 * 100);
-	end = clock();
-	printf("time %d\n",end - start);
+
+	char str[64];
+	while(true) {
+		printf("$: ");
+		scanf("%s",&str);
+		if(!strcmp(str,"d")) {
+			print_bitboard(b.wpawns);
+			print_bitboard(b.all);
+		} else if(!strcmp(str,"help")) {
+			size_t index = 0;
+			while (commands_recognized[index]) {
+				puts(commands_recognized[index]);
+				index++;
+			}
+		} else if(!strcmp(str,"go")) {
+			clock_t start,end;
+			start = clock();
+			simulate(&b,128 * 28 * 128 * 100);
+			end = clock();
+			printf("time %d\n",end - start);
+		} else if(!strcmp(str,"quit")) {
+			break;
+		} else {
+			int move;
+			str_sq(move,str);
+			b.do_move((U64(1) << move));
+		}
+	}
 
 	finalize_device();
 }

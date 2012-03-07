@@ -794,7 +794,7 @@ extern "C" cudaError_t cudaPrintfDisplay(void *outputFP, bool showThreadID)
     // first short from the buffer - it'll be the magic number
     // relating to the version.
     unsigned short magic;
-    cudaMemcpy(&magic, printfbuf_device, sizeof(unsigned short), cudaMemcpyDeviceToHost);
+	cudaMemcpy(&magic, printfbuf_start, sizeof(unsigned short), cudaMemcpyDeviceToHost); 
 
     // For SM_10 architecture, we've split our buffer into one-per-thread.
     // That means we must do each thread block separately. It'll require
