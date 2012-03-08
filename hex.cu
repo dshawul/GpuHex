@@ -26,6 +26,7 @@
 #define nWarps    (nThreads / WARP)
 #define TT_SIZE   4194304
 #define UCTK      0.44f
+#define UCTN      10
 #define FPU       1.10f
 
 //
@@ -49,7 +50,6 @@
 #	define l_unlock(x)   (atomicExch(&(x),0))
 #	define l_add(x,v)	 (atomicAdd(&x,v))
 #	define l_sub(x,v)	 (atomicSub(&x,v))
-#	define l_barrier()   __syncthreads()
 #else
 #	define LOCK          omp_lock_t
 #	define l_create(x)   omp_init_lock(&x)
@@ -65,9 +65,6 @@ template <class T>
 inline void l_sub(T x,T v) { 
 	#pragma omp atomic 
 		x-=v;
-}
-inline void l_barrier() { 
-	#pragma omp barrier 
 }
 #endif
 
@@ -409,7 +406,7 @@ NEXT:
 				value = FPU;
 			}
 
-			value -= (current->workers / 128.f);
+			value -= (current->workers / 1024.f);
 
 			if(value > bvalue) {
 				bvalue = value;
@@ -513,7 +510,7 @@ void playout(U32 N) {
 						sb.do_move(n->move);
 					}
 
-					if(n->uct_visits) {
+					if(n->uct_visits > UCTN) {
 						TABLE::create_children(&sb,n);
 						Node* next = TABLE::UCT_select(n);
 						if(next) {
