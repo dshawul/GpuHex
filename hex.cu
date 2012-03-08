@@ -16,12 +16,14 @@
 #ifdef GPU
 #	define nThreads   64
 #	define nBlocks   112
-#	define nLoop      16
+#	define WARP       32
 #else
 #	define nThreads    1
 #	define nBlocks     1
-#	define nLoop      16
+#	define WARP        1
 #endif
+#define nLoop     16
+#define nWarps    (nThreads / WARP)
 #define TT_SIZE   4194304
 #define UCTK      0.44f
 #define FPU       1.10f
@@ -471,8 +473,8 @@ void playout(U32 N) {
 		//shared data with in a block
 		//
 		__shared__ U32 cache[nThreads];
-		__shared__ BOARD sb;
-		__shared__ Node* n;
+		__shared__ BOARD sbw[nWarps];
+		__shared__ Node* nw[nWarps];
 		__shared__ bool finished;
 
 		//
@@ -488,16 +490,21 @@ void playout(U32 N) {
 			print("Block %d : Thread %d of %d\n",
 				blockId,threadId,nThreads);
 #endif
+			
 			BOARD b;
+			BOARD& sb = sbw[threadId / WARP];
+			Node*& n = nw[threadId / WARP];
 			b.seed(blockId * nBlocks + threadId);
+			finished = false;
+			const int threadIdWarp = threadId & (WARP - 1);
+
 			//
 			//loop forever
 			//
 			while(true) {
 
 				//get node
-				if(threadId == 0) {
-					finished = false;
+				if(threadIdWarp == 0) {
 					n = TABLE::root_node;
 					sb.copy(TABLE::root_board);
 
@@ -517,48 +524,33 @@ void playout(U32 N) {
 
 					l_add(n->workers,1);
 				}
-				l_barrier();
-				b.copy(sb);
 
 				//playout the position
+				b.copy(sb);
 				cache[threadId] = b.playout(sb);
 
-				//reduction 
-				l_barrier();
-				int p = nThreads;
-				int i = (p + 1) / 2;
-				while (i != 0) {
-					if ((threadId < i) && (threadId + i < p))
-						cache[threadId] += cache[threadId + i];
-					l_barrier();
-					p = i;
-					if(p > 1) i = (p + 1) / 2;
-					else i = p / 2;
-				}
-
 				//update result
-				if (threadId == 0) {
+				if(threadIdWarp == 0) {
 					l_sub(n->workers,1);
 
-					U32 score;
-					if(sb.player != 0) 
-						score = cache[0];
-					else
-						score = nLoop * nThreads - cache[0];
+					U32 score = 0;
+					for(int i = 0;i < WARP;i++)
+						score += cache[threadId + i];
+					if(sb.player == 0) 
+						score = nLoop * WARP - score;
 						
 					Node* current = n;
 					while(current) {
 						l_lock(current->lock);
 						current->uct_wins += score;
-						current->uct_visits += nLoop * nThreads;
+						current->uct_visits += nLoop * WARP;
 						l_unlock(current->lock);
-						score = nLoop * nThreads - score;
+						score = nLoop * WARP - score;
 						current = current->parent;
 					}
 					if(TABLE::root_node->uct_visits >= N)
 						finished = true;
 				}
-				l_barrier();
 				if(finished)
 					break;
 			}
@@ -581,6 +573,7 @@ void simulate(BOARD* b,U32 N) {
 
 	TABLE::reset <<<1,1>>> ();
 	playout <<<nBlocks,nThreads>>> (N); 
+	cudaThreadSynchronize();
 	TABLE::print_tree <<<1,1>>> (1);
 
 	cudaPrintfDisplay();
