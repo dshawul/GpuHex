@@ -15,7 +15,7 @@
 //
 #ifdef GPU
 #	define nThreads   64
-#	define nBlocks    84
+#	define nBlocks   112
 #	define nLoop      16
 #else
 #	define nThreads    1
@@ -329,7 +329,7 @@ namespace TABLE {
 							print("\t");
 						sq = firstone(current->move);
 						sq_str(sq,str);
-						print("%d.%s %d %d %.6f\n",
+						print("%d.%s %12d %12d %12.6f\n",
 							depth,(const char*)str,
 							current->uct_wins,current->uct_visits,
 							float(current->uct_wins) / current->uct_visits
@@ -402,7 +402,7 @@ NEXT:
 		while(current) {
 			if(current->uct_visits > 0) { 
 				value = UCTK * sqrtf(logn / (current->uct_visits + 1))
-					+ (current->uct_wins + 1) / (current->uct_visits + 1); 
+					+ (current->uct_wins + 1) / float(current->uct_visits + 1); 
 			} else {
 				value = FPU;
 			}
@@ -698,10 +698,11 @@ static const char *const commands_recognized[] = {
 int main() {
 	init_device();
 
+	char str[64];
 	BOARD b;
 	b.clear();
-
-	char str[64];
+	
+	printf("\nType <help> for a list of commands.\n\n");
 	while(true) {
 		printf("$: ");
 		scanf("%s",&str);
