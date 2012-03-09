@@ -17,7 +17,7 @@
 //
 #ifdef GPU
 #	define nThreads   64
-#	define nBlocks    28
+#	define nBlocks    112
 #	define WARP       32
 #else
 #	define nThreads    1
@@ -389,9 +389,7 @@ int BOARD::count_moves() {
 	pieceb = pieces[player] & pieces[pawn];
 	if(player == white) {
 		movesb = (pieceb << 8) & ~occ;
-		count += popcnt(movesb);
-	
-		movesb = ((movesb << 8) & ~occ) & U64(0x00000000ff000000);
+		movesb |= ((movesb << 8) & ~occ) & U64(0x00000000ff000000);
 		count += popcnt(movesb);
 
 		movesb = ((pieceb & U64(0xf7f7f7f7f7f7f7f7)) << 7) & pieces[black];
@@ -401,9 +399,7 @@ int BOARD::count_moves() {
 		count += popcnt(movesb);
 	} else {
 		movesb = (pieceb >> 8) & ~occ;
-		count += popcnt(movesb);
-
-		movesb = ((movesb >> 8) & ~occ) & U64(0x000000ff00000000);
+		movesb |= ((movesb >> 8) & ~occ) & U64(0x000000ff00000000);
 		count += popcnt(movesb);
 
 		movesb = ((pieceb & U64(0x7f7f7f7f7f7f7f7f)) >> 7) & pieces[white];
@@ -817,10 +813,6 @@ struct BOARD {
 	char player;
 	char emptyc;
 
-	U32 playout(const BOARD&);
-	void make_random_move();
-	bool is_white_win();
-
 	__device__ __host__
 	void clear() {
 		wpawns = 0;
@@ -871,6 +863,13 @@ struct BOARD {
 		print_bitboard(all);
 	}
 
+	U32 playout(const BOARD&);
+	void make_random_move();
+	bool is_white_win();
+
+	int count_moves();
+	MOVE gen_move(int);
+
 	void str_mov(MOVE& move,const char* is);
 };
 
@@ -919,6 +918,24 @@ U32 BOARD::playout(const BOARD& b) {
 }
 
 __device__ __host__
+int BOARD::count_moves() {
+	return emptyc;
+}
+
+__device__ __host__
+MOVE BOARD::gen_move(int index) {
+	int count = 0;
+	U64 m = all;
+	while(m) {
+		if(count == index)
+			return MOVE(m & -m);
+		count++;
+		m &= m - 1;
+	}
+	return MOVE();
+}
+
+__device__ __host__
 char* mov_str(const MOVE& move,char* s) {
 	int sq = firstone(move);
 	s = sq_str(sq,s);
@@ -926,7 +943,9 @@ char* mov_str(const MOVE& move,char* s) {
 }
 __host__
 void BOARD::str_mov(MOVE& move,const char* is) {
-	move = str_sq(move,is);
+	int sq;
+	str_sq(sq,is);
+	move = ((U64)1 << sq);
 }
 #endif
 
@@ -1050,25 +1069,20 @@ NEXT:
 			return;
 		}
 
-		/*/
-		Node* last = n;
-		U64 m = b->all;
-		U64 lsb;
-		while(m) {
-			lsb = m & -m;
-		
-			Node* node = get_node();
+		Node *last = n,*node;
+		MOVE move;
+		int N = b->count_moves();
+		for(int i = 0;i < N;i++) {
+			move = b->gen_move(i);
+			node = get_node();
 			if(!node) break;
-			node->move = lsb;
+			node->move = move;
 			node->parent = n;
 			if(last == n) last->child = node;
 			else last->next = node;
 			last = node;
-			
-			m ^= lsb;
 		}
-		//*/
-
+		
 		l_unlock(n->lock);
 	}
 
@@ -1485,7 +1499,7 @@ int main() {
 		} else if(!strcmp(str,"go")) {
 			clock_t start,end;
 			start = clock();
-			simulate(&b,128 * 1 * 128 * 100);
+			simulate(&b,128 * 2 * 128 * 100);
 			end = clock();
 			printf("time %d\n",end - start);
 		} else if(!strcmp(str,"quit")) {
