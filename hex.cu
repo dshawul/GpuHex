@@ -1,5 +1,5 @@
 
-#define GPU __CUDACC__
+//#define GPU __CUDACC__
 
 #define CHESS
 
@@ -107,6 +107,8 @@ inline void l_sub(T x,T v) {
 #	define FMTU64 "0x%016llx"
 #endif
 
+#define unitBB(x) ((U64)1 << (x))
+
 //
 // Collection of bitboard tricks suitable for GPUs from
 // http://chessprogramming.wikispaces.com/Bitboards
@@ -124,6 +126,10 @@ __constant__
 U64 antidiag_mask_ex[64];
 __constant__
 unsigned char first_rank_attacks[64][8];
+__constant__
+U64 nfileHBB = U64(0xfefefefefefefefe);
+__constant__
+U64 nfileABB = U64(0x7f7f7f7f7f7f7f7f);
 
 __device__ __host__
 unsigned int firstone(U64 bb) {
@@ -215,17 +221,14 @@ U64 antidiagAttacks( U64 occ, int sq ) {
 
 __device__ __host__
 char* sq_str(const int& sq,char* s) {
-	int f = file(sq);
-	int r = rank(sq);
-	*s++ = 'a' + (f);
-	*s++ = '1' + (r);
+	*s++ = 'a' + file(sq);
+	*s++ = '1' + rank(sq);
 	*s = 0;
 	return s;
 }
 
 __host__
-void str_sq(int& sq,const char* is) {
-	const char* s = is;
+void str_sq(const char* s,int& sq) {
 	int f = tolower(*s++) - 'a';
 	int r = atoi(s++) - 1;
 	sq = SQ(r,f);
@@ -234,11 +237,11 @@ void str_sq(int& sq,const char* is) {
 __host__
 void print_bitboard(U64 b) {
 	std::string s = "";
-	for(int i=7;i>=0;i--) {
-		for(int z = 0; z < 7-i;z++)
+	for(int i = 7;i >= 0;i--) {
+		for(int z = 0; z < 7 - i; z++)
 			s += " ";
-		for(int j=0;j<8;j++) {
-			U64 m = (((U64)1) << (i * 8 + j));
+		for(int j = 0;j < 8;j++) {
+			U64 m = unitBB(i * 8 + j);
 			if(b & m) s += "1 ";
 			else s += "0 ";
 		}
@@ -249,17 +252,23 @@ void print_bitboard(U64 b) {
 }
 
 //
-// define board game
+// CHESS
 //
 
 #ifdef CHESS
 
 static const char piece_name[] = "KQRBNPkqrbnp";
+__constant__ char d_piece_name[] = "__KQRBNP";
 static const char rank_name[] = "12345678";
 static const char file_name[] = "abcdefgh";
 static const char col_name[] = "WwBb";
 static const char cas_name[] = "KQkq";
-static const char start_fen[] = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+static const char start_fen[] = 
+//"rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+//"r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1";
+//"rnbqkbnr/-pp-pppp/p-------/---pP---/--------/--------/PPPP-PPP/RNBQKBNR w KQkq d6 0 1";
+"1q6/P6k/8/5N1K/8/8/8/8 w - - 0 1";
+
 
 enum PIECES {
 	white,black,king,queen,rook,bishop,knight,pawn
@@ -274,10 +283,27 @@ enum CASTLE_STATUS {
 	WSC_FLAG = 1, WLC_FLAG = 2, BSC_FLAG = 4, BLC_FLAG = 8,
 	WSLC_FLAG = 3, BSLC_FLAG = 12, WBC_FLAG = 15
 };
+enum SQUARES {
+	A1 = 0,B1,C1,D1,E1,F1,G1,H1,
+	A8 =56,B8,C8,D8,E8,F8,G8,H8
+};
 
-#define m_from(x)  ((x) & 0xff)
-#define m_to(x)    (((x) >> 8) & 0xff)
-#define m_piece(x) (((x) >> 16) & 0xff)
+#define FROM_FLAG        0x000000ff
+#define TO_FLAG          0x0000ff00
+#define PIECE_FLAG       0x000f0000
+#define PROMOTION_FLAG   0x00f00000
+#define EP_FLAG          0x10000000
+#define CASTLE_FLAG      0x20000000
+#define FROM_TO          0x0000ffff
+#define is_ep(x)         ((x) & EP_FLAG)
+#define is_castle(x)     ((x) & CASTLE_FLAG)
+#define is_same(x,y)     (((x) & FROM_TO) == ((y) & FROM_TO))
+#define m_from(x)        (int)((x) & FROM_FLAG)
+#define m_to(x)          (int)(((x) & TO_FLAG) >> 8)
+#define m_piece(x)       (int)(((x) & PIECE_FLAG) >> 16)
+#define m_promote(x)     (int)(((x) & PROMOTION_FLAG) >> 20)
+#define m_make(from,to,pic,prom,flag) \
+	((from) | ((to) << 8) | ((pic) << 16) | ((prom) << 20) | (flag))
 
 typedef U32 MOVE;
 
@@ -285,12 +311,12 @@ struct BOARD {
 	U64 pieces[8];
 	U32 randn;
 	unsigned char player;
-	unsigned char castle;
 	unsigned char epsquare;
 	unsigned char fifty;
+	unsigned char castle;
 
 	__host__
-	void clear() {
+	void init() {
 		set_fen(start_fen);
 	}
 
@@ -298,20 +324,20 @@ struct BOARD {
 	void copy(const BOARD& b) {
 		memcpy(pieces,b.pieces,sizeof(pieces));
 		player = b.player;
-		castle = b.castle;
 		epsquare = b.epsquare;
 		fifty = b.fifty;
+		castle = b.castle;
 	}
 
 	__device__ __host__
 	void xor(int sq,int ind) {
-		pieces[ind] ^= (U64(1) << sq);
+		pieces[ind] ^= unitBB(sq);
 	}
 
 	__device__ __host__
 	void xor(int sq,int pic,int col) {
-		pieces[col] ^= (U64(1) << sq);
-		pieces[pic] ^= (U64(1) << sq);
+		pieces[col] ^= unitBB(sq);
+		pieces[pic] ^= unitBB(sq);
 	}
 
 	__device__ __host__
@@ -344,7 +370,8 @@ struct BOARD {
 
 	void set_fen(const char* fen);
 	void get_fen(char* fen) const;
-	void str_mov(MOVE& move,const char* is);
+	void str_mov(const char*,MOVE&);
+	MOVE get_move(const char*);
 
 	__host__
 	void print_board() const{
@@ -359,22 +386,69 @@ void BOARD::do_move(const MOVE& move) {
 	int from = m_from(move);
 	int to = m_to(move);
 	int pic = m_piece(move);
+	int prom = m_promote(move);
 
 	xor(from,pic,player);
 
-	U64 toBB = ((U64)1 << to) & pieces[player ^ 1];
-	if(toBB) {
-		int cap = 0;
-		for(int i = pawn;i >= queen;i--) {
-			if(toBB & pieces[i]) {
-				cap = i;
-				break;
+	epsquare = 0;
+	fifty++;
+	if(is_ep(move)) {
+		if(player == white)
+			xor(to - 8,pawn,black);
+		else
+			xor(to + 8,pawn,white);
+		fifty = 0;
+	} else {
+		U64 toBB = unitBB(to) & pieces[player ^ 1];
+		if(toBB) {
+			int cap = 0;
+			for(int i = pawn;i >= queen;i--) {
+				if(toBB & pieces[i]) {
+					cap = i;
+					break;
+				}
 			}
+			xor(to,cap,player ^ 1);
+			fifty = 0;
 		}
-		xor(to,cap,player ^ 1);
 	}
 
-	xor(to,pic,player);
+	if(prom)
+		xor(to,prom,player);
+	else
+		xor(to,pic,player);
+
+	if(is_castle(move)) {
+        int fromc,toc;
+		if(to > from) {
+           fromc = to + 1;
+		   toc = to - 1;
+		} else {
+           fromc = to - 2;
+		   toc = to + 1;
+		}
+		
+		xor(fromc,rook,player);
+		xor(toc,rook,player);
+	} 
+
+	if(pic == pawn) {
+		fifty = 0;
+		if(player == white) {
+			if(to - from == 16 && rank(from) == RANK2)
+				epsquare = (from + to) / 2;
+		} else {
+			if(from - to == 16 && rank(from) == RANK7)
+				epsquare = (from + to) / 2;
+		}
+	}
+
+	if(castle) {
+		if(from == E1 || to == A1 || from == A1) castle &= ~WLC_FLAG;
+		if(from == E1 || to == H1 || from == H1) castle &= ~WSC_FLAG;
+		if(from == E8 || to == A8 || from == A8) castle &= ~BLC_FLAG;
+		if(from == E8 || to == H8 || from == H8) castle &= ~BSC_FLAG;
+	}
 
 	player ^= 1;
 }
@@ -388,25 +462,71 @@ int BOARD::count_moves() {
 	//pawns
 	pieceb = pieces[player] & pieces[pawn];
 	if(player == white) {
+
+		//non-promotions
+		pieceb &= U64(0x0000ffffffffff00);
 		movesb = (pieceb << 8) & ~occ;
 		movesb |= ((movesb << 8) & ~occ) & U64(0x00000000ff000000);
 		count += popcnt(movesb);
 
-		movesb = ((pieceb & U64(0xf7f7f7f7f7f7f7f7)) << 7) & pieces[black];
+		movesb = ((pieceb & nfileHBB) << 7) & pieces[black];
 		count += popcnt(movesb);
 
-		movesb = ((pieceb & U64(0x7f7f7f7f7f7f7f7f)) << 9) & pieces[black];
+		movesb = ((pieceb & nfileABB) << 9) & pieces[black];
 		count += popcnt(movesb);
+
+		if(epsquare) {
+			from = epsquare - 9;
+			if((file(from) < FILEH) && (unitBB(from) & pieceb))
+				count++;
+			from = epsquare - 7;
+			if((file(from) > FILEA) && (unitBB(from) & pieceb))
+				count++;
+		}
+
+		//promotions
+		pieceb = pieces[player] & pieces[pawn] & U64(0x00ff000000000000);
+		movesb = (pieceb << 8) & ~occ;
+		count += 4 * popcnt(movesb);
+
+		movesb = ((pieceb & nfileHBB) << 7) & pieces[black];
+		count += 4 * popcnt(movesb);
+
+		movesb = ((pieceb & nfileABB) << 9) & pieces[black];
+		count += 4 * popcnt(movesb);
 	} else {
+
+		//non-promotions
+		pieceb &= U64(0x00ffffffffff0000);
 		movesb = (pieceb >> 8) & ~occ;
 		movesb |= ((movesb >> 8) & ~occ) & U64(0x000000ff00000000);
 		count += popcnt(movesb);
 
-		movesb = ((pieceb & U64(0x7f7f7f7f7f7f7f7f)) >> 7) & pieces[white];
+		movesb = ((pieceb & nfileABB) >> 7) & pieces[white];
 		count += popcnt(movesb);
 
-		movesb = ((pieceb & U64(0xf7f7f7f7f7f7f7f7)) >> 9) & pieces[white];
+		movesb = ((pieceb & nfileHBB) >> 9) & pieces[white];
 		count += popcnt(movesb);
+
+		if(epsquare) {
+			from = epsquare + 9;
+			if((file(from) > FILEA) && (unitBB(from) & pieceb))
+				count++;
+			from = epsquare + 7;
+			if((file(from) < FILEH) && (unitBB(from) & pieceb))
+				count++;
+		}
+
+		//promotions
+		pieceb = pieces[player] & pieces[pawn] & U64(0x000000000000ff00);
+		movesb = (pieceb >> 8) & ~occ;
+		count += 4 * popcnt(movesb);
+
+		movesb = ((pieceb & nfileABB) >> 7) & pieces[white];
+		count += 4 * popcnt(movesb);
+
+		movesb = ((pieceb & nfileHBB) >> 9) & pieces[white];
+		count += 4 * popcnt(movesb);
 	}
 
 	//legal board
@@ -446,6 +566,44 @@ int BOARD::count_moves() {
 		movesb = queenAttacks(occ,from) & legalB;
 		count += popcnt(movesb);
 		pieceb &= pieceb - 1;
+	}
+
+	//king
+	pieceb = pieces[player] & pieces[king];
+	while(pieceb) {
+		from = firstone(pieceb);
+		movesb = kingAttacks(from) & legalB;
+		count += popcnt(movesb);
+		pieceb &= pieceb - 1;
+	}
+
+	//castle
+	if(player == white) {
+		if(castle & WSLC_FLAG) {
+			if((castle & WSC_FLAG) &&
+				!(occ & U64(0x0000000000000060))
+				) {
+				count++;
+			}
+			if((castle & WLC_FLAG) &&
+				!(occ & U64(0x000000000000000e))
+				){
+				count++;
+			}
+		}
+	} else {
+		if(castle & BSLC_FLAG) {
+			if((castle & BSC_FLAG) &&
+				!(occ & U64(0x6000000000000000))
+				) {
+				count++;
+			}
+			if((castle & BLC_FLAG) &&
+				!(occ & U64(0x0e00000000000000))
+				){
+				count++;
+			}
+		}
 	}
 
 	return count;
@@ -458,81 +616,169 @@ MOVE BOARD::gen_move(int index) {
 	int from,to,count = 0;
 
 	//move
-#define CHECK(pic) {										\
-	count++;												\
-	if(count == index + 1) {								\
-		MOVE move = from | (to << 8) | (pic << 16);			\
-		return move;										\
-	}														\
+#define MOVEPC(pic,prom,flag) {							\
+	count++;											\
+	if(count == index + 1) {							\
+		MOVE move = m_make(from,to,pic,prom,flag);		\
+		return move;									\
+	}													\
 };
+
+#define MOVEP(pic)				MOVEPC(pic,0,0)
+#define MOVEP_EP(pic)			MOVEPC(pic,0,EP_FLAG)
+#define MOVEP_CASTLE(pic)		MOVEPC(pic,0,CASTLE_FLAG)
+#define MOVEP_PROMOTE(pic)  {	\
+	MOVEPC(pic,queen,0);		\
+	MOVEPC(pic,knight,0);		\
+	MOVEPC(pic,rook,0);			\
+	MOVEPC(pic,bishop,0);		\
+};
+
+
 	//pawns
 	pieceb = pieces[player] & pieces[pawn];
 	if(player == white) {
 		U64 tempb;
 
+		//non-promotions
+		pieceb &= U64(0x0000ffffffffff00);
 		movesb = (pieceb << 8) & ~occ;
 		tempb = movesb;
 		while(movesb) {
 			to = firstone(movesb);
 			from = to - 8;
-			CHECK(pawn);
+			MOVEP(pawn);
 			movesb &= movesb - 1;
 		}
+
 		movesb = ((tempb << 8) & ~occ) & U64(0x00000000ff000000);
 		while(movesb) {
 			to = firstone(movesb);
 			from = to - 16;
-			CHECK(pawn);
+			MOVEP(pawn);
 			movesb &= movesb - 1;
 		}
 
-		movesb = ((pieceb & U64(0xf7f7f7f7f7f7f7f7)) << 7) & pieces[black];
+		movesb = ((pieceb & nfileHBB) << 7) & pieces[black];
 		while(movesb) {
 			to = firstone(movesb);
 			from = to - 7;
-			CHECK(pawn);
+			MOVEP(pawn);
 			movesb &= movesb - 1;
 		}
 
-		movesb = ((pieceb & U64(0x7f7f7f7f7f7f7f7f)) << 9) & pieces[black];
+		movesb = ((pieceb & nfileABB) << 9) & pieces[black];
 		while(movesb) {
 			to = firstone(movesb);
 			from = to - 9;
-			CHECK(pawn);
+			MOVEP(pawn);
+			movesb &= movesb - 1;
+		}
+		//enpassant
+		if(epsquare) {
+			to = epsquare;
+			from = epsquare - 9;
+			if((file(from) < FILEH) && (unitBB(from) & pieceb))
+				MOVEP_EP(pawn);
+			from = epsquare - 7;
+			if((file(from) > FILEA) && (unitBB(from) & pieceb))
+				MOVEP_EP(pawn);
+		}
+		//promote
+		pieceb = pieces[player] & pieces[pawn] & U64(0x00ff000000000000);
+		movesb = (pieceb << 8) & ~occ;
+		while(movesb) {
+			to = firstone(movesb);
+			from = to - 8;
+			MOVEP_PROMOTE(pawn);
+			movesb &= movesb - 1;
+		}
+
+		movesb = ((pieceb & nfileHBB) << 7) & pieces[black];
+		while(movesb) {
+			to = firstone(movesb);
+			from = to - 7;
+			MOVEP_PROMOTE(pawn);
+			movesb &= movesb - 1;
+		}
+
+		movesb = ((pieceb & nfileABB) << 9) & pieces[black];
+		while(movesb) {
+			to = firstone(movesb);
+			from = to - 9;
+			MOVEP_PROMOTE(pawn);
 			movesb &= movesb - 1;
 		}
 	} else {
 		U64 tempb;
 
+		//non-promotions
+		pieceb &= U64(0x00ffffffffff0000);
 		movesb = (pieceb >> 8) & ~occ;
 		tempb = movesb;
 		while(movesb) {
 			to= firstone(movesb);
 			from = to + 8;
-			CHECK(pawn);
+			MOVEP(pawn);
 			movesb &= movesb - 1;
 		}
+
 		movesb = ((tempb >> 8) & ~occ) & U64(0x000000ff00000000);
 		while(movesb) {
 			to = firstone(movesb);
 			from = to + 16;
-			CHECK(pawn);
+			MOVEP(pawn);
 			movesb &= movesb - 1;
 		}
 
-		movesb = ((pieceb & U64(0x7f7f7f7f7f7f7f7f)) >> 7) & pieces[white];
+		movesb = ((pieceb & nfileABB) >> 7) & pieces[white];
 		while(movesb) {
 			to = firstone(movesb);
 			from = to + 7;
-			CHECK(pawn);
+			MOVEP(pawn);
 			movesb &= movesb - 1;
 		}
 
-		movesb = ((pieceb & U64(0xf7f7f7f7f7f7f7f7)) >> 9) & pieces[white];
+		movesb = ((pieceb & nfileHBB) >> 9) & pieces[white];
 		while(movesb) {
 			to = firstone(movesb);
 			from = to + 9;
-			CHECK(pawn);
+			MOVEP(pawn);
+			movesb &= movesb - 1;
+		}
+		//enpassant
+		if(epsquare) {
+			to = epsquare;
+			from = epsquare + 9;
+			if((file(from) > FILEA) && (unitBB(from) & pieceb))
+				MOVEP_EP(pawn);
+			from = epsquare + 7;
+			if((file(from) < FILEH) && (unitBB(from) & pieceb))
+				MOVEP_EP(pawn);
+		}
+		//promote
+		pieceb = pieces[player] & pieces[pawn] & U64(0x000000000000ff00);
+		movesb = (pieceb >> 8) & ~occ;
+		while(movesb) {
+			to= firstone(movesb);
+			from = to + 8;
+			MOVEP_PROMOTE(pawn);
+			movesb &= movesb - 1;
+		}
+
+		movesb = ((pieceb & nfileABB) >> 7) & pieces[white];
+		while(movesb) {
+			to = firstone(movesb);
+			from = to + 7;
+			MOVEP_PROMOTE(pawn);
+			movesb &= movesb - 1;
+		}
+
+		movesb = ((pieceb & nfileHBB) >> 9) & pieces[white];
+		while(movesb) {
+			to = firstone(movesb);
+			from = to + 9;
+			MOVEP_PROMOTE(pawn);
 			movesb &= movesb - 1;
 		}
 	}
@@ -548,7 +794,7 @@ MOVE BOARD::gen_move(int index) {
 
 		while(movesb) {
 			to = firstone(movesb);
-			CHECK(knight);
+			MOVEP(knight);
 			movesb &= movesb - 1;
 		}
 
@@ -563,7 +809,7 @@ MOVE BOARD::gen_move(int index) {
 
 		while(movesb) {
 			to = firstone(movesb);
-			CHECK(bishop);
+			MOVEP(bishop);
 			movesb &= movesb - 1;
 		}
 
@@ -578,7 +824,7 @@ MOVE BOARD::gen_move(int index) {
 
 		while(movesb) {
 			to = firstone(movesb);
-			CHECK(rook);
+			MOVEP(rook);
 			movesb &= movesb - 1;
 		}
 
@@ -593,11 +839,63 @@ MOVE BOARD::gen_move(int index) {
 
 		while(movesb) {
 			to = firstone(movesb);
-			CHECK(queen);
+			MOVEP(queen);
 			movesb &= movesb - 1;
 		}
 
 		pieceb &= pieceb - 1;
+	}
+
+	//king
+	pieceb = pieces[player] & pieces[king];
+	while(pieceb) {
+		from = firstone(pieceb);
+		movesb = kingAttacks(from) & legalB;
+
+		while(movesb) {
+			to = firstone(movesb);
+			MOVEP(king);
+			movesb &= movesb - 1;
+		}
+
+		pieceb &= pieceb - 1;
+	}
+
+	//castle
+	if(player == white) {
+		if(castle & WSLC_FLAG) {
+			if((castle & WSC_FLAG) &&
+				!(occ & U64(0x0000000000000060))
+				) {
+				from = E1;
+				to = G1;
+				MOVEP_CASTLE(king);
+			}
+			if((castle & WLC_FLAG) &&
+				!(occ & U64(0x000000000000000e))
+				){
+				from = E1;
+				to = C1;
+				MOVEP_CASTLE(king);
+			}
+		}
+	} else {
+		if(castle & BSLC_FLAG) {
+			if((castle & BSC_FLAG) &&
+				!(occ & U64(0x6000000000000000))
+				) {
+				from = E8;
+				to = G8;
+				MOVEP_CASTLE(king);
+			}
+			if((castle & BLC_FLAG) &&
+				!(occ & U64(0x0e00000000000000))
+				){
+				from = E8;
+				to = C8;
+				MOVEP_CASTLE(king);
+			}
+		}
 	}
 
 	return MOVE();
@@ -607,14 +905,14 @@ __device__ __host__
 bool BOARD::attacked(U64 occ,int sq,int col) {
 	U64 pawns = pieces[col] & pieces[pawn];
 	if(col == white) {
-		if(file(sq) > FILEA && (((U64)1 << (sq - 9)) & pawns))
+		if(file(sq) > FILEA && (unitBB(sq - 9) & pawns))
 			return true;
-		if(file(sq) < FILEH && (((U64)1 << (sq - 7)) & pawns))
+		if(file(sq) < FILEH && (unitBB(sq - 7) & pawns))
 			return true;
 	} else {
-		if(file(sq) > FILEA && (((U64)1 << (sq + 7)) & pawns))
+		if(file(sq) > FILEA && (unitBB(sq + 7) & pawns))
 			return true;
-		if(file(sq) < FILEH && (((U64)1 << (sq + 9)) & pawns))
+		if(file(sq) < FILEH && (unitBB(sq + 9) & pawns))
 			return true;
 	}
 	if(knightAttacks(sq) & pieces[col] & pieces[knight]) return true;
@@ -661,7 +959,7 @@ void BOARD::set_fen(const char* fen_str) {
 	memset(this,0,sizeof(BOARD));
 
 	//pieces
-	int i,r,f,sq,pic,col,move_number;
+	int i,r,f,sq,pic,col;
 	const char* p = fen_str,*pfen;
 	for(r = RANK8;r >= RANK1; r--) {
 		for(f = FILEA;f <= FILEH;f++) {
@@ -704,18 +1002,20 @@ void BOARD::set_fen(const char* fen_str) {
 		epsquare = 0;
 		p++;
 	} else {
-		epsquare = int(strchr(file_name,*p) - file_name);
+		epsquare = char(strchr(file_name,*p) - file_name);
 		p++;
-		epsquare += 16 * int(strchr(rank_name,*p) - rank_name);
+		epsquare = char(epsquare + 8 * (strchr(rank_name,*p) - rank_name));
 		p++;
 	}
-
+	
 	//fifty & hply
 	p++;
-	if(*p) sscanf(p,"%d %d",&fifty,&move_number);
-	else {
+	if(*p) {
+		int f;
+		sscanf(p,"%d",&f);
+		fifty = f;
+	} else {
 		fifty = 0;
-		move_number = 1;
 	}	
 }
 
@@ -729,14 +1029,14 @@ void BOARD::get_fen(char* fen) const {
 			sq = SQ(r,f);
 			pic = 0;
 			for(int k = king;k <= pawn;k++) {
-				if(pieces[k] & ((U64)1 << sq)) {
+				if(pieces[k] & unitBB(sq)) {
 					pic = k;
 					break;
 				}
 			}
 			if(pic) {
 				pic -= 2;
-				if(pieces[black] & ((U64)1 << sq))
+				if(pieces[black] & unitBB(sq))
 					pic += 6;
 				*fen++ = piece_name[pic];
 			} else {
@@ -774,24 +1074,25 @@ void BOARD::get_fen(char* fen) const {
 
 	//fifty & hply
 	char str[12];
-	int move_number = 1;
-	sprintf(str," %d %d",fifty,move_number);
+	sprintf(str," %d 1",fifty);
 	strcat(fen,str);
 }
 
 __device__ __host__
-char* mov_str(const MOVE& move,char* s) {
+void mov_str(const MOVE& move,char* s) {
 	s = sq_str(m_from(move),s);
 	s = sq_str(m_to(move),s);
-	return s;
+	if(m_promote(move))
+		*s++ = d_piece_name[m_promote(move)];
+	*s = 0;
 }
 __host__
-void BOARD::str_mov(MOVE& move,const char* is) {
+void BOARD::str_mov(const char* s,MOVE& move) {
 	int from,to,pic = 0;
-	str_sq(from,is);
-	str_sq(to,&is[2]);
+	str_sq(s,from);
+	str_sq(s + 2,to);
 
-	U64 fromBB = ((U64)1 << from) & pieces[player];
+	U64 fromBB = unitBB(from) & pieces[player];
 	if(fromBB) {
 		for(int i = pawn;i >= queen;i--) {
 			if(fromBB & pieces[i]) {
@@ -800,11 +1101,16 @@ void BOARD::str_mov(MOVE& move,const char* is) {
 			}
 		}
 	}
-	move = from | (to << 8) | (pic << 16);
+	move = m_make(from,to,pic,0,0);
 }
+//
+//HEX
+//
 #else
 
 typedef U64 MOVE;
+
+#define is_same(x,y) ((x) == (y))
 
 struct BOARD {
 	U64 wpawns;
@@ -814,7 +1120,7 @@ struct BOARD {
 	char emptyc;
 
 	__device__ __host__
-	void clear() {
+	void init() {
 		wpawns = 0;
 		all = U64(0xffffffffffffffff);
 		emptyc = 64;
@@ -869,8 +1175,9 @@ struct BOARD {
 
 	int count_moves();
 	MOVE gen_move(int);
-
-	void str_mov(MOVE& move,const char* is);
+	
+	void str_mov(const char*,MOVE& move);
+	MOVE get_move(const char*);
 };
 
 
@@ -891,8 +1198,8 @@ bool BOARD::is_white_win(){
 	do {
 		oldm = m;
 		m |=((((m << 8) | (m >> 8)) | 
-			 (((m << 9) | (m << 1)) & U64(0xfefefefefefefefe)) | 
-			 (((m >> 9) | (m >> 1)) & U64(0x7f7f7f7f7f7f7f7f))) 
+			 (((m << 9) | (m << 1)) & nfileHBB) | 
+			 (((m >> 9) | (m >> 1)) & nfileABB)) 
 			 & wpawns
 			);
 		if(m & U64(0xff00000000000000)) {
@@ -936,19 +1243,30 @@ MOVE BOARD::gen_move(int index) {
 }
 
 __device__ __host__
-char* mov_str(const MOVE& move,char* s) {
+void mov_str(const MOVE& move,char* s) {
 	int sq = firstone(move);
-	s = sq_str(sq,s);
-	return s;
+	sq_str(sq,s);
 }
 __host__
-void BOARD::str_mov(MOVE& move,const char* is) {
+void BOARD::str_mov(const char* s,MOVE& move) {
 	int sq;
-	str_sq(sq,is);
-	move = ((U64)1 << sq);
+	str_sq(s,sq);
+	move = unitBB(sq);
 }
 #endif
 
+__host__ 
+MOVE BOARD::get_move(const char* str) {
+	MOVE move,move1;
+	str_mov(str,move1);
+	int N = count_moves();
+	for(int i = 0;i < N;i++) {
+		move = gen_move(i);
+		if(is_same(move,move1))
+			return move;
+	}
+	return MOVE();
+}
 //
 // Node
 //
@@ -1024,7 +1342,7 @@ namespace TABLE {
 						for(int i = 0;i < depth;i++)
 							print("\t");
 						mov_str(current->move,str);
-						print("%d.%s %12d %12d %12.6f\n",
+						print("%d.%5s %12d %12d %12.6f\n",
 							depth,(const char*)str,
 							current->uct_wins,current->uct_visits,
 							float(current->uct_wins) / current->uct_visits
@@ -1293,8 +1611,6 @@ void playout(U32 N) {
 #pragma omp parallel num_threads(nThreads)
 		{
 			const int threadId = omp_get_thread_num();
-			print("Block %d : Thread %d of %d\n",
-				blockId,threadId,nThreads);
 #endif
 			
 			BOARD b;
@@ -1480,11 +1796,12 @@ static const char *const commands_recognized[] = {
 int main() {
 	init_device();
 
-	char str[64];
+	char str[256];
 	BOARD b;
-	b.clear();
+	b.init();
 	
 	printf("\nType <help> for a list of commands.\n\n");
+
 	while(true) {
 		printf("$: ");
 		scanf("%s",&str);
@@ -1499,15 +1816,17 @@ int main() {
 		} else if(!strcmp(str,"go")) {
 			clock_t start,end;
 			start = clock();
-			simulate(&b,128 * 2 * 128 * 100);
+			simulate(&b,128 * 1 * 128 * 100);
 			end = clock();
 			printf("time %d\n",end - start);
 		} else if(!strcmp(str,"quit")) {
 			break;
 		} else {
-			MOVE move;
-			b.str_mov(move,str);
-			b.do_move(move);
+			MOVE move = b.get_move(str);
+			if(move != 0)
+				b.do_move(move);
+			else
+				printf("Illegal move\n");
 		}
 	}
 
