@@ -1,5 +1,5 @@
 
-//#define GPU __CUDACC__
+#define GPU __CUDACC__
 
 #define CHESS
 
@@ -17,7 +17,7 @@
 //
 #ifdef GPU
 #	define nThreads   64
-#	define nBlocks    112
+#	define nBlocks    28
 #	define WARP       32
 #else
 #	define nThreads    1
@@ -84,11 +84,6 @@ inline void l_sub(T x,T v) {
 #	define __global__
 #   define __shared__
 #   define __constant__
-#if defined (__GNUC__)
-#	define __align__(x)  __attribute__ ((aligned(x)))
-#else
-#	define __align__(x) __declspec(align(x))
-#endif
 #endif
 
 //
@@ -126,12 +121,11 @@ __constant__
 U64 antidiag_mask_ex[64];
 __constant__
 unsigned char first_rank_attacks[64][8];
-__constant__
-U64 nfileHBB = U64(0xfefefefefefefefe);
-__constant__
-U64 nfileABB = U64(0x7f7f7f7f7f7f7f7f);
 
-__device__ __host__
+#define nfileHBB U64(0xfefefefefefefefe)
+#define nfileABB U64(0x7f7f7f7f7f7f7f7f)
+
+__device__
 unsigned int firstone(U64 bb) {
 	unsigned int folded;
 	bb ^= bb - 1;
@@ -139,7 +133,7 @@ unsigned int firstone(U64 bb) {
 	return index64[folded * 0x78291ACF >> 26];
 }
 
-__device__ __host__
+__device__
 int popcnt(U64 bb) {
 	const U32 k1 = 0x55555555;
 	const U32 k2 = 0x33333333;
@@ -156,7 +150,7 @@ int popcnt(U64 bb) {
 	return (int) (((hi + lo) * kf) >> 24);
 }
 
-__device__ __host__
+__device__
 U64 rankAttacks( U64 occ, int sq ) { 
    union { U64 b; struct { unsigned int l; unsigned int h; }; } b;
    int f = sq & 7; 
@@ -173,7 +167,7 @@ U64 rankAttacks( U64 occ, int sq ) {
    return b.b; 
 } 
 
-__device__ __host__
+__device__
 U64 fileAttacks( U64 occ, int sq ) { 
    union { U64 b; struct { unsigned int l; unsigned int h; }; } b;
    int f = sq & 7; 
@@ -188,7 +182,7 @@ U64 fileAttacks( U64 occ, int sq ) {
    return b.b; 
 } 
 
-__device__ __host__
+__device__
 U64 diagonalAttacks( U64 occ, int sq ) { 
    union { U64 b; struct { unsigned int l; unsigned int h; }; } b;
    b.b = occ & diagonal_mask_ex[sq]; 
@@ -197,7 +191,7 @@ U64 diagonalAttacks( U64 occ, int sq ) {
    return b.b & diagonal_mask_ex[sq]; 
 } 
 
-__device__ __host__
+__device__
 U64 antidiagAttacks( U64 occ, int sq ) { 
    union { U64 b; struct { unsigned int l; unsigned int h; }; } b;
    b.b = occ & antidiag_mask_ex[sq]; 
@@ -213,7 +207,7 @@ U64 antidiagAttacks( U64 occ, int sq ) {
 #define queenAttacks(occ,sq) (rookAttacks(occ,sq) | bishopAttacks(occ,sq))
 
 //
-//sq to string and vice versa
+//sq_to_string and vice versa
 //
 #define file(x)          ((x) & 7)
 #define rank(x)          ((x) >> 3)
@@ -257,18 +251,13 @@ void print_bitboard(U64 b) {
 
 #ifdef CHESS
 
-static const char piece_name[] = "KQRBNPkqrbnp";
 __constant__ char d_piece_name[] = "__KQRBNP";
+static const char piece_name[] = "KQRBNPkqrbnp";
 static const char rank_name[] = "12345678";
 static const char file_name[] = "abcdefgh";
 static const char col_name[] = "WwBb";
 static const char cas_name[] = "KQkq";
-static const char start_fen[] = 
-//"rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
-//"r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1";
-//"rnbqkbnr/-pp-pppp/p-------/---pP---/--------/--------/PPPP-PPP/RNBQKBNR w KQkq d6 0 1";
-"1q6/P6k/8/5N1K/8/8/8/8 w - - 0 1";
-
+static const char start_fen[] = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
 
 enum PIECES {
 	white,black,king,queen,rook,bishop,knight,pawn
@@ -288,6 +277,10 @@ enum SQUARES {
 	A8 =56,B8,C8,D8,E8,F8,G8,H8
 };
 
+
+//Move is 32 bit
+typedef U32 MOVE;
+
 #define FROM_FLAG        0x000000ff
 #define TO_FLAG          0x0000ff00
 #define PIECE_FLAG       0x000f0000
@@ -305,39 +298,37 @@ enum SQUARES {
 #define m_make(from,to,pic,prom,flag) \
 	((from) | ((to) << 8) | ((pic) << 16) | ((prom) << 20) | (flag))
 
-typedef U32 MOVE;
 
+//BOARD
 struct BOARD {
-	U64 pieces[8];
+	U64 wpieces;
+	U64 bpieces;
+	U64 kings;
+	U64 queens;
+	U64 rooks;
+	U64 bishops;
+	U64 knights;
+	U64 pawns;
 	U32 randn;
 	unsigned char player;
 	unsigned char epsquare;
 	unsigned char fifty;
 	unsigned char castle;
 
-	__host__
-	void init() {
-		set_fen(start_fen);
-	}
-
-	__host__ __device__
+	__device__ __host__ 
 	void copy(const BOARD& b) {
-		memcpy(pieces,b.pieces,sizeof(pieces));
+		wpieces = b.wpieces;
+		bpieces = b.bpieces;
+		kings = b.kings;
+		queens = b.queens;
+		rooks = b.rooks;
+		bishops = b.bishops;
+		knights = b.knights;
+		pawns = b.pawns;
 		player = b.player;
 		epsquare = b.epsquare;
 		fifty = b.fifty;
 		castle = b.castle;
-	}
-
-	__device__ __host__
-	void xor(int sq,int ind) {
-		pieces[ind] ^= unitBB(sq);
-	}
-
-	__device__ __host__
-	void xor(int sq,int pic,int col) {
-		pieces[col] ^= unitBB(sq);
-		pieces[pic] ^= unitBB(sq);
 	}
 
 	__device__ __host__
@@ -359,19 +350,10 @@ struct BOARD {
 			  ((U64)rand() << 45) ^ ((U64)rand() << 60);
 	}
 
-	U32 playout(const BOARD&);
-	void make_random_move();
-	bool is_white_win();
-
-	void do_move(const MOVE& move);
-	int count_moves();
-	MOVE gen_move(int);
-	bool attacked(U64,int,int);
-
-	void set_fen(const char* fen);
-	void get_fen(char* fen) const;
-	void str_mov(const char*,MOVE&);
-	MOVE get_move(const char*);
+	__host__
+	void init() {
+		set_fen(start_fen);
+	}
 
 	__host__
 	void print_board() const{
@@ -379,45 +361,94 @@ struct BOARD {
 		get_fen(fen);
 		printf("%s\n",fen);
 	}
+
+	U32 playout(const BOARD&);
+	void make_random_move();
+	bool is_white_win();
+
+	void do_move(const MOVE& move);
+	int count_moves() const;
+	MOVE gen_move(const int&) const;
+	bool attacks(U64,int,int);
+
+	void set_fen(const char* fen);
+	void get_fen(char* fen) const;
+	void str_mov(const char*,MOVE&);
+	MOVE get_move(const char*);
 };
 
 __device__ __host__
 void BOARD::do_move(const MOVE& move) {
-	int from = m_from(move);
-	int to = m_to(move);
-	int pic = m_piece(move);
-	int prom = m_promote(move);
+	const int from = m_from(move);
+	const int to = m_to(move);
+	const U64 mfromBB = unitBB(from);
+	const U64 mtoBB = unitBB(to);
 
-	xor(from,pic,player);
+	//erase from
+	{
+		if(player == white)
+			wpieces ^= mfromBB;
+		else
+			bpieces ^= mfromBB;
+		switch(m_piece(move)) {
+			case king: kings ^= mfromBB; break;
+			case queen: queens ^= mfromBB; break;
+			case rook: rooks ^= mfromBB; break;
+			case bishop: bishops ^= mfromBB; break;
+			case knight: knights ^= mfromBB; break;
+			case pawn: pawns ^= mfromBB; break;
+		}
+	}
 
+	//capture
 	epsquare = 0;
 	fifty++;
 	if(is_ep(move)) {
-		if(player == white)
-			xor(to - 8,pawn,black);
-		else
-			xor(to + 8,pawn,white);
+		if(player == white) {
+			bpieces ^= unitBB(to - 8);
+			pawns ^= unitBB(to - 8);
+		} else {
+			wpieces ^= unitBB(to + 8);
+			pawns ^= unitBB(to + 8);
+		}
 		fifty = 0;
 	} else {
-		U64 toBB = unitBB(to) & pieces[player ^ 1];
+		U64 toBB;
+		if(player == white) {
+			toBB = mtoBB & bpieces;
+			if(toBB) wpieces ^= mtoBB;
+		} else {
+			toBB = mtoBB & wpieces;
+			if(toBB) bpieces ^= mtoBB;
+		}
 		if(toBB) {
-			int cap = 0;
-			for(int i = pawn;i >= queen;i--) {
-				if(toBB & pieces[i]) {
-					cap = i;
-					break;
-				}
-			}
-			xor(to,cap,player ^ 1);
+			if(toBB & pawns) pawns ^= mtoBB;
+			else if(toBB & knights) knights ^= mtoBB;
+			else if(toBB & bishops) bishops ^= mtoBB;
+			else if(toBB & rooks) rooks ^= mtoBB;
+			else if(toBB & queens) queens ^= mtoBB;
 			fifty = 0;
 		}
 	}
 
-	if(prom)
-		xor(to,prom,player);
-	else
-		xor(to,pic,player);
+	//put new piece
+	{
+		int newp = m_promote(move) ? m_promote(move) : m_piece(move);
+		if(player == white)
+			wpieces ^= mtoBB;
+		else
+			bpieces ^= mtoBB;
+		switch(newp) {
+			case king: kings ^= mtoBB; break;
+			case queen: queens ^= mtoBB; break;
+			case rook: rooks ^= mtoBB; break;
+			case bishop: bishops ^= mtoBB; break;
+			case knight: knights ^= mtoBB; break;
+			case pawn: pawns ^= mtoBB; break;
+		}
+	}
 
+	//castle
 	if(is_castle(move)) {
         int fromc,toc;
 		if(to > from) {
@@ -428,21 +459,30 @@ void BOARD::do_move(const MOVE& move) {
 		   toc = to + 1;
 		}
 		
-		xor(fromc,rook,player);
-		xor(toc,rook,player);
+		if(player == white) {
+			wpieces ^= unitBB(fromc);
+			wpieces ^= unitBB(toc);
+		} else {
+			bpieces ^= unitBB(fromc);
+			bpieces ^= unitBB(toc);
+		}
+        rooks ^= unitBB(fromc);
+		rooks ^= unitBB(toc);
 	} 
 
-	if(pic == pawn) {
+	//enpassant
+	if(m_piece(move) == pawn) {
 		fifty = 0;
 		if(player == white) {
-			if(to - from == 16 && rank(from) == RANK2)
-				epsquare = (from + to) / 2;
+			if((to == from + 16) && (rank(from) == RANK2))
+				epsquare = (from + to) >> 1;
 		} else {
-			if(from - to == 16 && rank(from) == RANK7)
-				epsquare = (from + to) / 2;
+			if((to == from - 16) && (rank(from) == RANK7))
+				epsquare = (from + to) >> 1;
 		}
 	}
 
+	//castle
 	if(castle) {
 		if(from == E1 || to == A1 || from == A1) castle &= ~WLC_FLAG;
 		if(from == E1 || to == H1 || from == H1) castle &= ~WSC_FLAG;
@@ -453,26 +493,29 @@ void BOARD::do_move(const MOVE& move) {
 	player ^= 1;
 }
 
-__device__ __host__
-int BOARD::count_moves() {
-	const U64 occ = (pieces[white] | pieces[black]);
+__device__
+int BOARD::count_moves() const {
+	const U64 occ = wpieces | bpieces;
 	U64 pieceb,movesb;
 	int from,count = 0;
 
-	//pawns
-	pieceb = pieces[player] & pieces[pawn];
 	if(player == white) {
+		//
+		//WHITE
+		//
 
 		//non-promotions
+		pieceb = wpieces & pawns;
 		pieceb &= U64(0x0000ffffffffff00);
+
 		movesb = (pieceb << 8) & ~occ;
 		movesb |= ((movesb << 8) & ~occ) & U64(0x00000000ff000000);
 		count += popcnt(movesb);
 
-		movesb = ((pieceb & nfileHBB) << 7) & pieces[black];
+		movesb = ((pieceb & nfileHBB) << 7) & bpieces;
 		count += popcnt(movesb);
 
-		movesb = ((pieceb & nfileABB) << 9) & pieces[black];
+		movesb = ((pieceb & nfileABB) << 9) & bpieces;
 		count += popcnt(movesb);
 
 		if(epsquare) {
@@ -485,27 +528,96 @@ int BOARD::count_moves() {
 		}
 
 		//promotions
-		pieceb = pieces[player] & pieces[pawn] & U64(0x00ff000000000000);
+		pieceb = wpieces & pawns;
+		pieceb &= U64(0x00ff000000000000);
+
 		movesb = (pieceb << 8) & ~occ;
 		count += 4 * popcnt(movesb);
 
-		movesb = ((pieceb & nfileHBB) << 7) & pieces[black];
+		movesb = ((pieceb & nfileHBB) << 7) & bpieces;
 		count += 4 * popcnt(movesb);
 
-		movesb = ((pieceb & nfileABB) << 9) & pieces[black];
+		movesb = ((pieceb & nfileABB) << 9) & bpieces;
 		count += 4 * popcnt(movesb);
+
+		//legal board
+		const U64 legalB = (~occ | bpieces);
+
+		//knight
+		pieceb = wpieces & knights;
+		while(pieceb) {
+			from = firstone(pieceb);
+			movesb = knightAttacks(from) & legalB;
+			count += popcnt(movesb);
+			pieceb &= pieceb - 1;
+		}
+
+		//bishop
+		pieceb = wpieces & bishops;
+		while(pieceb) {
+			from = firstone(pieceb);
+			movesb = bishopAttacks(occ,from) & legalB;
+			count += popcnt(movesb);
+			pieceb &= pieceb - 1;
+		}
+
+		//rook
+		pieceb = wpieces & rooks;
+		while(pieceb) {
+			from = firstone(pieceb);
+			movesb = rookAttacks(occ,from) & legalB;
+			count += popcnt(movesb);
+			pieceb &= pieceb - 1;
+		}
+
+		//queen
+		pieceb = wpieces & queens;
+		while(pieceb) {
+			from = firstone(pieceb);
+			movesb = queenAttacks(occ,from) & legalB;
+			count += popcnt(movesb);
+			pieceb &= pieceb - 1;
+		}
+
+		//king
+		pieceb = wpieces & kings;
+		while(pieceb) {
+			from = firstone(pieceb);
+			movesb = kingAttacks(from) & legalB;
+			count += popcnt(movesb);
+			pieceb &= pieceb - 1;
+		}
+
+		//castle
+		if(castle & WSLC_FLAG) {
+			if((castle & WSC_FLAG) &&
+				!(occ & U64(0x0000000000000060))
+				) {
+					count++;
+			}
+			if((castle & WLC_FLAG) &&
+				!(occ & U64(0x000000000000000e))
+				){
+					count++;
+			}
+		}
+		
 	} else {
+		//
+		//BLACK
+		//
 
 		//non-promotions
+		pieceb = bpieces & pawns;
 		pieceb &= U64(0x00ffffffffff0000);
 		movesb = (pieceb >> 8) & ~occ;
 		movesb |= ((movesb >> 8) & ~occ) & U64(0x000000ff00000000);
 		count += popcnt(movesb);
 
-		movesb = ((pieceb & nfileABB) >> 7) & pieces[white];
+		movesb = ((pieceb & nfileABB) >> 7) & wpieces;
 		count += popcnt(movesb);
 
-		movesb = ((pieceb & nfileHBB) >> 9) & pieces[white];
+		movesb = ((pieceb & nfileHBB) >> 9) & wpieces;
 		count += popcnt(movesb);
 
 		if(epsquare) {
@@ -518,104 +630,91 @@ int BOARD::count_moves() {
 		}
 
 		//promotions
-		pieceb = pieces[player] & pieces[pawn] & U64(0x000000000000ff00);
+		pieceb = bpieces & pawns;
+		pieceb &= U64(0x000000000000ff00);
 		movesb = (pieceb >> 8) & ~occ;
 		count += 4 * popcnt(movesb);
 
-		movesb = ((pieceb & nfileABB) >> 7) & pieces[white];
+		movesb = ((pieceb & nfileABB) >> 7) & wpieces;
 		count += 4 * popcnt(movesb);
 
-		movesb = ((pieceb & nfileHBB) >> 9) & pieces[white];
+		movesb = ((pieceb & nfileHBB) >> 9) & wpieces;
 		count += 4 * popcnt(movesb);
-	}
 
-	//legal board
-	const U64 legalB = (~occ | pieces[player ^ 1]);
+		//legal board
+		const U64 legalB = (~occ | wpieces);
 
-	//knight
-	pieceb = pieces[player] & pieces[knight];
-	while(pieceb) {
-		from = firstone(pieceb);
-		movesb = knightAttacks(from) & legalB;
-		count += popcnt(movesb);
-		pieceb &= pieceb - 1;
-	}
-
-	//bishop
-	pieceb = pieces[player] & pieces[bishop];
-	while(pieceb) {
-		from = firstone(pieceb);
-		movesb = bishopAttacks(occ,from) & legalB;
-		count += popcnt(movesb);
-		pieceb &= pieceb - 1;
-	}
-
-	//rook
-	pieceb = pieces[player] & pieces[rook];
-	while(pieceb) {
-		from = firstone(pieceb);
-		movesb = rookAttacks(occ,from) & legalB;
-		count += popcnt(movesb);
-		pieceb &= pieceb - 1;
-	}
-
-	//queen
-	pieceb = pieces[player] & pieces[queen];
-	while(pieceb) {
-		from = firstone(pieceb);
-		movesb = queenAttacks(occ,from) & legalB;
-		count += popcnt(movesb);
-		pieceb &= pieceb - 1;
-	}
-
-	//king
-	pieceb = pieces[player] & pieces[king];
-	while(pieceb) {
-		from = firstone(pieceb);
-		movesb = kingAttacks(from) & legalB;
-		count += popcnt(movesb);
-		pieceb &= pieceb - 1;
-	}
-
-	//castle
-	if(player == white) {
-		if(castle & WSLC_FLAG) {
-			if((castle & WSC_FLAG) &&
-				!(occ & U64(0x0000000000000060))
-				) {
-				count++;
-			}
-			if((castle & WLC_FLAG) &&
-				!(occ & U64(0x000000000000000e))
-				){
-				count++;
-			}
+		//knight
+		pieceb = bpieces & knights;
+		while(pieceb) {
+			from = firstone(pieceb);
+			movesb = knightAttacks(from) & legalB;
+			count += popcnt(movesb);
+			pieceb &= pieceb - 1;
 		}
-	} else {
+
+		//bishop
+		pieceb = bpieces & bishops;
+		while(pieceb) {
+			from = firstone(pieceb);
+			movesb = bishopAttacks(occ,from) & legalB;
+			count += popcnt(movesb);
+			pieceb &= pieceb - 1;
+		}
+
+		//rook
+		pieceb = bpieces & rooks;
+		while(pieceb) {
+			from = firstone(pieceb);
+			movesb = rookAttacks(occ,from) & legalB;
+			count += popcnt(movesb);
+			pieceb &= pieceb - 1;
+		}
+
+		//queen
+		pieceb = bpieces & queens;
+		while(pieceb) {
+			from = firstone(pieceb);
+			movesb = queenAttacks(occ,from) & legalB;
+			count += popcnt(movesb);
+			pieceb &= pieceb - 1;
+		}
+
+		//king
+		pieceb = bpieces & kings;
+		while(pieceb) {
+			from = firstone(pieceb);
+			movesb = kingAttacks(from) & legalB;
+			count += popcnt(movesb);
+			pieceb &= pieceb - 1;
+		}
+
+		//castle
 		if(castle & BSLC_FLAG) {
 			if((castle & BSC_FLAG) &&
 				!(occ & U64(0x6000000000000000))
 				) {
-				count++;
+					count++;
 			}
 			if((castle & BLC_FLAG) &&
 				!(occ & U64(0x0e00000000000000))
 				){
-				count++;
+					count++;
 			}
 		}
 	}
-
 	return count;
 } 
 
-__device__ __host__
-MOVE BOARD::gen_move(int index) {
-	const U64 occ = (pieces[white] | pieces[black]);
+__device__
+MOVE BOARD::gen_move(const int& index) const {
+	const U64 occ = wpieces | bpieces;
 	U64 pieceb,movesb;
 	int from,to,count = 0;
 
-	//move
+	//
+	//MOVE
+	//
 #define MOVEPC(pic,prom,flag) {							\
 	count++;											\
 	if(count == index + 1) {							\
@@ -634,19 +733,19 @@ MOVE BOARD::gen_move(int index) {
 	MOVEPC(pic,bishop,0);		\
 };
 
-
-	//pawns
-	pieceb = pieces[player] & pieces[pawn];
 	if(player == white) {
-		U64 tempb;
+		//
+		//WHITE
+		//
 
 		//non-promotions
+		pieceb = wpieces & pawns;
 		pieceb &= U64(0x0000ffffffffff00);
 		movesb = (pieceb << 8) & ~occ;
-		tempb = movesb;
+		U64 tempb = movesb;
 		while(movesb) {
 			to = firstone(movesb);
-			from = to - 8;
+			from = to - 8;	
 			MOVEP(pawn);
 			movesb &= movesb - 1;
 		}
@@ -659,7 +758,7 @@ MOVE BOARD::gen_move(int index) {
 			movesb &= movesb - 1;
 		}
 
-		movesb = ((pieceb & nfileHBB) << 7) & pieces[black];
+		movesb = ((pieceb & nfileHBB) << 7) & bpieces;
 		while(movesb) {
 			to = firstone(movesb);
 			from = to - 7;
@@ -667,7 +766,7 @@ MOVE BOARD::gen_move(int index) {
 			movesb &= movesb - 1;
 		}
 
-		movesb = ((pieceb & nfileABB) << 9) & pieces[black];
+		movesb = ((pieceb & nfileABB) << 9) & bpieces;
 		while(movesb) {
 			to = firstone(movesb);
 			from = to - 9;
@@ -685,7 +784,8 @@ MOVE BOARD::gen_move(int index) {
 				MOVEP_EP(pawn);
 		}
 		//promote
-		pieceb = pieces[player] & pieces[pawn] & U64(0x00ff000000000000);
+		pieceb = wpieces & pawns;
+		pieceb &= U64(0x00ff000000000000);
 		movesb = (pieceb << 8) & ~occ;
 		while(movesb) {
 			to = firstone(movesb);
@@ -694,7 +794,7 @@ MOVE BOARD::gen_move(int index) {
 			movesb &= movesb - 1;
 		}
 
-		movesb = ((pieceb & nfileHBB) << 7) & pieces[black];
+		movesb = ((pieceb & nfileHBB) << 7) & bpieces;
 		while(movesb) {
 			to = firstone(movesb);
 			from = to - 7;
@@ -702,20 +802,120 @@ MOVE BOARD::gen_move(int index) {
 			movesb &= movesb - 1;
 		}
 
-		movesb = ((pieceb & nfileABB) << 9) & pieces[black];
+		movesb = ((pieceb & nfileABB) << 9) & bpieces;
 		while(movesb) {
 			to = firstone(movesb);
 			from = to - 9;
 			MOVEP_PROMOTE(pawn);
 			movesb &= movesb - 1;
 		}
+
+		//legal board
+		const U64 legalB = (~occ | bpieces);
+
+		//knight
+		pieceb = wpieces & knights;
+		while(pieceb) {
+			from = firstone(pieceb);
+			movesb = knightAttacks(from) & legalB;
+
+			while(movesb) {
+				to = firstone(movesb);
+				MOVEP(knight);
+				movesb &= movesb - 1;
+			}
+
+			pieceb &= pieceb - 1;
+		}
+
+		//bishop
+		pieceb = wpieces & bishops;
+		while(pieceb) {
+			from = firstone(pieceb);
+			movesb = bishopAttacks(occ,from) & legalB;
+
+			while(movesb) {
+				to = firstone(movesb);
+				MOVEP(bishop);
+				movesb &= movesb - 1;
+			}
+
+			pieceb &= pieceb - 1;
+		}
+
+		//rook
+		pieceb = wpieces & rooks;
+		while(pieceb) {
+			from = firstone(pieceb);
+			movesb = rookAttacks(occ,from) & legalB;
+
+			while(movesb) {
+				to = firstone(movesb);
+				MOVEP(rook);
+				movesb &= movesb - 1;
+			}
+
+			pieceb &= pieceb - 1;
+		}
+
+		//queen
+		pieceb = wpieces & queens;
+		while(pieceb) {
+			from = firstone(pieceb);
+			movesb = queenAttacks(occ,from) & legalB;
+
+			while(movesb) {
+				to = firstone(movesb);
+				MOVEP(queen);
+				movesb &= movesb - 1;
+			}
+
+			pieceb &= pieceb - 1;
+		}
+
+		//king
+		pieceb = wpieces & kings;
+		while(pieceb) {
+			from = firstone(pieceb);
+			movesb = kingAttacks(from) & legalB;
+
+			while(movesb) {
+				to = firstone(movesb);
+				MOVEP(king);
+				movesb &= movesb - 1;
+			}
+
+			pieceb &= pieceb - 1;
+		}
+
+		//castle
+		if(castle & WSLC_FLAG) {
+			if((castle & WSC_FLAG) &&
+				!(occ & U64(0x0000000000000060))
+				) {
+					from = E1;
+					to = G1;
+					MOVEP_CASTLE(king);
+			}
+			if((castle & WLC_FLAG) &&
+				!(occ & U64(0x000000000000000e))
+				){
+					from = E1;
+					to = C1;
+					MOVEP_CASTLE(king);
+			}
+		}
+		
 	} else {
-		U64 tempb;
+		//
+		//BLACK
+		//
 
 		//non-promotions
+		pieceb = bpieces & pawns;
 		pieceb &= U64(0x00ffffffffff0000);
 		movesb = (pieceb >> 8) & ~occ;
-		tempb = movesb;
+		U64 tempb = movesb;
 		while(movesb) {
 			to= firstone(movesb);
 			from = to + 8;
@@ -731,7 +931,7 @@ MOVE BOARD::gen_move(int index) {
 			movesb &= movesb - 1;
 		}
 
-		movesb = ((pieceb & nfileABB) >> 7) & pieces[white];
+		movesb = ((pieceb & nfileABB) >> 7) & wpieces;
 		while(movesb) {
 			to = firstone(movesb);
 			from = to + 7;
@@ -739,7 +939,7 @@ MOVE BOARD::gen_move(int index) {
 			movesb &= movesb - 1;
 		}
 
-		movesb = ((pieceb & nfileHBB) >> 9) & pieces[white];
+		movesb = ((pieceb & nfileHBB) >> 9) & wpieces;
 		while(movesb) {
 			to = firstone(movesb);
 			from = to + 9;
@@ -757,7 +957,8 @@ MOVE BOARD::gen_move(int index) {
 				MOVEP_EP(pawn);
 		}
 		//promote
-		pieceb = pieces[player] & pieces[pawn] & U64(0x000000000000ff00);
+		pieceb = bpieces & pawns;
+		pieceb &= U64(0x000000000000ff00);
 		movesb = (pieceb >> 8) & ~occ;
 		while(movesb) {
 			to= firstone(movesb);
@@ -766,7 +967,7 @@ MOVE BOARD::gen_move(int index) {
 			movesb &= movesb - 1;
 		}
 
-		movesb = ((pieceb & nfileABB) >> 7) & pieces[white];
+		movesb = ((pieceb & nfileABB) >> 7) & wpieces;
 		while(movesb) {
 			to = firstone(movesb);
 			from = to + 7;
@@ -774,126 +975,107 @@ MOVE BOARD::gen_move(int index) {
 			movesb &= movesb - 1;
 		}
 
-		movesb = ((pieceb & nfileHBB) >> 9) & pieces[white];
+		movesb = ((pieceb & nfileHBB) >> 9) & wpieces;
 		while(movesb) {
 			to = firstone(movesb);
 			from = to + 9;
 			MOVEP_PROMOTE(pawn);
 			movesb &= movesb - 1;
 		}
-	}
 
-	//legal board
-	const U64 legalB = (~occ | pieces[player ^ 1]);
+		//legal board
+		const U64 legalB = (~occ | wpieces);
 
-	//knight
-	pieceb = pieces[player] & pieces[knight];
-	while(pieceb) {
-		from = firstone(pieceb);
-		movesb = knightAttacks(from) & legalB;
+		//knight
+		pieceb = bpieces & knights;
+		while(pieceb) {
+			from = firstone(pieceb);
+			movesb = knightAttacks(from) & legalB;
 
-		while(movesb) {
-			to = firstone(movesb);
-			MOVEP(knight);
-			movesb &= movesb - 1;
-		}
-
-		pieceb &= pieceb - 1;
-	}
-
-	//bishop
-	pieceb = pieces[player] & pieces[bishop];
-	while(pieceb) {
-		from = firstone(pieceb);
-		movesb = bishopAttacks(occ,from) & legalB;
-
-		while(movesb) {
-			to = firstone(movesb);
-			MOVEP(bishop);
-			movesb &= movesb - 1;
-		}
-
-		pieceb &= pieceb - 1;
-	}
-
-	//rook
-	pieceb = pieces[player] & pieces[rook];
-	while(pieceb) {
-		from = firstone(pieceb);
-		movesb = rookAttacks(occ,from) & legalB;
-
-		while(movesb) {
-			to = firstone(movesb);
-			MOVEP(rook);
-			movesb &= movesb - 1;
-		}
-
-		pieceb &= pieceb - 1;
-	}
-
-	//queen
-	pieceb = pieces[player] & pieces[queen];
-	while(pieceb) {
-		from = firstone(pieceb);
-		movesb = queenAttacks(occ,from) & legalB;
-
-		while(movesb) {
-			to = firstone(movesb);
-			MOVEP(queen);
-			movesb &= movesb - 1;
-		}
-
-		pieceb &= pieceb - 1;
-	}
-
-	//king
-	pieceb = pieces[player] & pieces[king];
-	while(pieceb) {
-		from = firstone(pieceb);
-		movesb = kingAttacks(from) & legalB;
-
-		while(movesb) {
-			to = firstone(movesb);
-			MOVEP(king);
-			movesb &= movesb - 1;
-		}
-
-		pieceb &= pieceb - 1;
-	}
-
-	//castle
-	if(player == white) {
-		if(castle & WSLC_FLAG) {
-			if((castle & WSC_FLAG) &&
-				!(occ & U64(0x0000000000000060))
-				) {
-				from = E1;
-				to = G1;
-				MOVEP_CASTLE(king);
+			while(movesb) {
+				to = firstone(movesb);
+				MOVEP(knight);
+				movesb &= movesb - 1;
 			}
-			if((castle & WLC_FLAG) &&
-				!(occ & U64(0x000000000000000e))
-				){
-				from = E1;
-				to = C1;
-				MOVEP_CASTLE(king);
-			}
+
+			pieceb &= pieceb - 1;
 		}
-	} else {
+
+		//bishop
+		pieceb = bpieces & bishops;
+		while(pieceb) {
+			from = firstone(pieceb);
+			movesb = bishopAttacks(occ,from) & legalB;
+
+			while(movesb) {
+				to = firstone(movesb);
+				MOVEP(bishop);
+				movesb &= movesb - 1;
+			}
+
+			pieceb &= pieceb - 1;
+		}
+
+		//rook
+		pieceb = bpieces & rooks;
+		while(pieceb) {
+			from = firstone(pieceb);
+			movesb = rookAttacks(occ,from) & legalB;
+
+			while(movesb) {
+				to = firstone(movesb);
+				MOVEP(rook);
+				movesb &= movesb - 1;
+			}
+
+			pieceb &= pieceb - 1;
+		}
+
+		//queen
+		pieceb = bpieces & queens;
+		while(pieceb) {
+			from = firstone(pieceb);
+			movesb = queenAttacks(occ,from) & legalB;
+
+			while(movesb) {
+				to = firstone(movesb);
+				MOVEP(queen);
+				movesb &= movesb - 1;
+			}
+
+			pieceb &= pieceb - 1;
+		}
+
+		//king
+		pieceb = bpieces & kings;
+		while(pieceb) {
+			from = firstone(pieceb);
+			movesb = kingAttacks(from) & legalB;
+
+			while(movesb) {
+				to = firstone(movesb);
+				MOVEP(king);
+				movesb &= movesb - 1;
+			}
+
+			pieceb &= pieceb - 1;
+		}
+
+		//castle
 		if(castle & BSLC_FLAG) {
 			if((castle & BSC_FLAG) &&
 				!(occ & U64(0x6000000000000000))
 				) {
-				from = E8;
-				to = G8;
-				MOVEP_CASTLE(king);
+					from = E8;
+					to = G8;
+					MOVEP_CASTLE(king);
 			}
 			if((castle & BLC_FLAG) &&
 				!(occ & U64(0x0e00000000000000))
 				){
-				from = E8;
-				to = C8;
-				MOVEP_CASTLE(king);
+					from = E8;
+					to = C8;
+					MOVEP_CASTLE(king);
 			}
 		}
 	}
@@ -901,50 +1083,54 @@ MOVE BOARD::gen_move(int index) {
 	return MOVE();
 }
 
-__device__ __host__
-bool BOARD::attacked(U64 occ,int sq,int col) {
-	U64 pawns = pieces[col] & pieces[pawn];
+__device__
+bool BOARD::attacks(U64 occ,int sq,int col) {
 	if(col == white) {
-		if(file(sq) > FILEA && (unitBB(sq - 9) & pawns))
-			return true;
-		if(file(sq) < FILEH && (unitBB(sq - 7) & pawns))
-			return true;
+		U64 wpawns = wpieces & pawns;
+		if(file(sq) > FILEA && (unitBB(sq - 9) & wpawns)) return true;
+		if(file(sq) < FILEH && (unitBB(sq - 7) & wpawns)) return true;
+		if(knightAttacks(sq) & wpieces & knights) return true;
+		if(kingAttacks(sq) & wpieces & kings) return true;
+		U64 bishopsQueens = wpieces & (bishops | queens );
+		if(bishopAttacks(occ, sq) & bishopsQueens) return true;
+		U64 rooksQueens = wpieces & (rooks | queens);
+		if(rookAttacks (occ, sq) & rooksQueens) return true;
 	} else {
-		if(file(sq) > FILEA && (unitBB(sq + 7) & pawns))
-			return true;
-		if(file(sq) < FILEH && (unitBB(sq + 9) & pawns))
-			return true;
+		U64 bpawns = bpieces & pawns;
+		if(file(sq) > FILEA && (unitBB(sq + 7) & bpawns)) return true;
+		if(file(sq) < FILEH && (unitBB(sq + 9) & bpawns)) return true;
+		if(knightAttacks(sq) & bpieces & knights) return true;
+		if(kingAttacks(sq) & bpieces & kings) return true;
+		U64 bishopsQueens = bpieces & (bishops | queens );
+		if(bishopAttacks(occ, sq) & bishopsQueens) return true;
+		U64 rooksQueens = bpieces & (rooks | queens);
+		if(rookAttacks (occ, sq) & rooksQueens) return true;
 	}
-	if(knightAttacks(sq) & pieces[col] & pieces[knight]) return true;
-	if(kingAttacks(sq) & pieces[col] & pieces[king]) return true;
-	U64 bishopsQueens = pieces[col] & (pieces[bishop] | pieces[queen] );
-	if(bishopAttacks(occ, sq) & bishopsQueens) return true;
-	U64 rooksQueens = pieces[col] & (pieces[rook] | pieces[queen]);
-	if(rookAttacks (occ, sq) & rooksQueens) return true;
 	return false;
 }
 
-__device__ __host__
+__device__
 void BOARD::make_random_move() {
 	U32 N = count_moves();
-	U32 index = U32((N) * (float(rand()) / 0x7fff));
+	U32 index = U32(N * (rand() / float(0x7fff)));
 	MOVE move = gen_move(index);
 	do_move(move);
 }
 
-__device__ __host__
+__device__
 bool BOARD::is_white_win(){
 	return (rand() & 1);
 }
 
-__device__ __host__
+__device__
 U32 BOARD::playout(const BOARD& b) {
 	U32 wins = 0;
 	for(U32 i = 0;i < nLoop;i++) {
 		this->copy(b);
 
-		for(int j = 0;j < 20;j++)
+		for(int j = 0;j < 20;j++) {
 			make_random_move();
+		}
 			
 		if(is_white_win())
 			wins++;
@@ -968,7 +1154,21 @@ void BOARD::set_fen(const char* fen_str) {
 				pic = int(strchr(piece_name,*pfen) - piece_name);
 				col = (pic >= 6);
 				pic = (pic % 6) + 2;
-				xor(sq,pic,col);
+
+				U64 maskBB = unitBB(sq);
+				if(col == white) 
+					wpieces ^= maskBB;
+				else 
+					bpieces ^= maskBB;
+				switch(pic) {
+					case king: kings ^= maskBB; break;
+					case queen: queens ^= maskBB; break;
+					case rook: rooks ^= maskBB; break;
+					case bishop: bishops ^= maskBB; break;
+					case knight: knights ^= maskBB; break;
+					case pawn: pawns ^= maskBB; break;
+				}
+
 			} else if((pfen = strchr(rank_name,*p)) != 0) {
 				for(i = 0;i < pfen - rank_name;i++) {
 					f++;
@@ -1028,15 +1228,17 @@ void BOARD::get_fen(char* fen) const {
 		for (f = 0; f <= 7 ; f++) {
 			sq = SQ(r,f);
 			pic = 0;
-			for(int k = king;k <= pawn;k++) {
-				if(pieces[k] & unitBB(sq)) {
-					pic = k;
-					break;
-				}
-			}
+
+			if(kings & unitBB(sq)) pic = king;
+			else if(queens & unitBB(sq)) pic = queen;
+			else if(rooks & unitBB(sq)) pic = rook;
+			else if(bishops & unitBB(sq)) pic = bishop;
+			else if(knights & unitBB(sq)) pic = knight;
+			else if(pawns & unitBB(sq)) pic = pawn;
+
 			if(pic) {
 				pic -= 2;
-				if(pieces[black] & unitBB(sq))
+				if(bpieces & unitBB(sq))
 					pic += 6;
 				*fen++ = piece_name[pic];
 			} else {
@@ -1078,7 +1280,7 @@ void BOARD::get_fen(char* fen) const {
 	strcat(fen,str);
 }
 
-__device__ __host__
+__device__
 void mov_str(const MOVE& move,char* s) {
 	s = sq_str(m_from(move),s);
 	s = sq_str(m_to(move),s);
@@ -1088,20 +1290,10 @@ void mov_str(const MOVE& move,char* s) {
 }
 __host__
 void BOARD::str_mov(const char* s,MOVE& move) {
-	int from,to,pic = 0;
+	int from,to;
 	str_sq(s,from);
 	str_sq(s + 2,to);
-
-	U64 fromBB = unitBB(from) & pieces[player];
-	if(fromBB) {
-		for(int i = pawn;i >= queen;i--) {
-			if(fromBB & pieces[i]) {
-				pic = i;
-				break;
-			}
-		}
-	}
-	move = m_make(from,to,pic,0,0);
+	move = m_make(from,to,0,0,0);
 }
 //
 //HEX
@@ -1119,15 +1311,7 @@ struct BOARD {
 	char player;
 	char emptyc;
 
-	__device__ __host__
-	void init() {
-		wpawns = 0;
-		all = U64(0xffffffffffffffff);
-		emptyc = 64;
-		player = 0;
-	}
-
-	__host__ __device__
+	__device__ __host__ 
 	void copy(const BOARD& b) {
 		wpawns = b.wpawns;
 		all = b.all;
@@ -1164,6 +1348,14 @@ struct BOARD {
 	}
 
 	__host__
+	void init() {
+		wpawns = 0;
+		all = U64(0xffffffffffffffff);
+		emptyc = 64;
+		player = 0;
+	}
+
+	__host__
 	void print_board() const {
 		print_bitboard(wpawns);
 		print_bitboard(all);
@@ -1173,15 +1365,15 @@ struct BOARD {
 	void make_random_move();
 	bool is_white_win();
 
-	int count_moves();
-	MOVE gen_move(int);
+	int count_moves() const;
+	MOVE gen_move(int) const;
 	
 	void str_mov(const char*,MOVE& move);
 	MOVE get_move(const char*);
 };
 
 
-__device__ __host__
+__device__
 void BOARD::make_random_move() {
 	U32 rbit = rand() % emptyc;
 	U64 move = all;
@@ -1192,7 +1384,7 @@ void BOARD::make_random_move() {
 	do_move(move);
 }
 
-__device__ __host__
+__device__
 bool BOARD::is_white_win(){
 	U64 m = (wpawns & U64(0x00000000000000ff)),oldm;
 	do {
@@ -1209,7 +1401,7 @@ bool BOARD::is_white_win(){
 	return false;
 }
 
-__device__ __host__
+__device__
 U32 BOARD::playout(const BOARD& b) {
 	U32 wins = 0;
 	for(U32 i = 0;i < nLoop;i++) {
@@ -1224,13 +1416,13 @@ U32 BOARD::playout(const BOARD& b) {
 	return wins;
 }
 
-__device__ __host__
-int BOARD::count_moves() {
+__device__
+int BOARD::count_moves() const {
 	return emptyc;
 }
 
-__device__ __host__
-MOVE BOARD::gen_move(int index) {
+__device__
+MOVE BOARD::gen_move(int index) const {
 	int count = 0;
 	U64 m = all;
 	while(m) {
@@ -1242,7 +1434,7 @@ MOVE BOARD::gen_move(int index) {
 	return MOVE();
 }
 
-__device__ __host__
+__device__
 void mov_str(const MOVE& move,char* s) {
 	int sq = firstone(move);
 	sq_str(sq,s);
@@ -1258,14 +1450,18 @@ void BOARD::str_mov(const char* s,MOVE& move) {
 __host__ 
 MOVE BOARD::get_move(const char* str) {
 	MOVE move,move1;
-	str_mov(str,move1);
+	str_mov(str,move);
+	/*/
 	int N = count_moves();
 	for(int i = 0;i < N;i++) {
-		move = gen_move(i);
+		move1 = gen_move(i);
 		if(is_same(move,move1))
-			return move;
+			return move1;
 	}
 	return MOVE();
+	/*/
+	return move;
+	//*/
 }
 //
 // Node
