@@ -1,7 +1,7 @@
 
 #define GPU __CUDACC__
 
-#define CHESS
+//#define CHESS
 
 #include <string>
 #ifdef GPU
@@ -207,6 +207,32 @@ U64 antidiagAttacks( U64 occ, int sq ) {
 #define queenAttacks(occ,sq) (rookAttacks(occ,sq) | bishopAttacks(occ,sq))
 
 //
+// A linear congruential(LCG) pseudo random number generator (PRNG).
+// Microsoft visual studio constants are used.
+//
+struct PRNG {
+	U32 randn;
+	__device__ __host__
+	void seed(int sd) {
+		randn = sd;
+	}
+
+	__device__ __host__
+	U32 rand() {
+		randn *= 214013;
+		randn += 2531011;
+		return ((randn >> 16) & 0x7fff);
+	}
+
+	__device__ __host__
+	U64 rand64() {
+		return((U64)rand()) ^ 
+			  ((U64)rand() << 15) ^ ((U64)rand() << 30) ^
+			  ((U64)rand() << 45) ^ ((U64)rand() << 60);
+	}
+};
+
+//
 //sq_to_string and vice versa
 //
 #define file(x)          ((x) & 7)
@@ -298,9 +324,12 @@ typedef U32 MOVE;
 #define m_make(from,to,pic,prom,flag) \
 	((from) | ((to) << 8) | ((pic) << 16) | ((prom) << 20) | (flag))
 
-
 //BOARD
-struct BOARD {
+struct BOARD : public PRNG {
+	unsigned char player;
+	unsigned char epsquare;
+	unsigned char fifty;
+	unsigned char castle;
 	U64 wpieces;
 	U64 bpieces;
 	U64 kings;
@@ -309,11 +338,6 @@ struct BOARD {
 	U64 bishops;
 	U64 knights;
 	U64 pawns;
-	U32 randn;
-	unsigned char player;
-	unsigned char epsquare;
-	unsigned char fifty;
-	unsigned char castle;
 
 	__device__ __host__ 
 	void copy(const BOARD& b) {
@@ -329,25 +353,6 @@ struct BOARD {
 		epsquare = b.epsquare;
 		fifty = b.fifty;
 		castle = b.castle;
-	}
-
-	__device__ __host__
-	void seed(int sd) {
-		randn = sd;
-	}
-
-	__device__ __host__
-	U32 rand() {
-		randn *= 214013;
-		randn += 2531011;
-		return ((randn >> 16) & 0x7fff);
-	}
-
-	__device__ __host__
-	U64 rand64() {
-		return((U64)rand()) ^ 
-			  ((U64)rand() << 15) ^ ((U64)rand() << 30) ^
-			  ((U64)rand() << 45) ^ ((U64)rand() << 60);
 	}
 
 	__host__
@@ -374,7 +379,6 @@ struct BOARD {
 	void set_fen(const char* fen);
 	void get_fen(char* fen) const;
 	void str_mov(const char*,MOVE&);
-	MOVE get_move(const char*);
 };
 
 __device__ __host__
@@ -601,7 +605,6 @@ int BOARD::count_moves() const {
 					count++;
 			}
 		}
-		
 	} else {
 		//
 		//BLACK
@@ -705,7 +708,6 @@ int BOARD::count_moves() const {
 	}
 	return count;
 } 
-
 __device__
 MOVE BOARD::gen_move(const int& index) const {
 	const U64 occ = wpieces | bpieces;
@@ -1304,12 +1306,11 @@ typedef U64 MOVE;
 
 #define is_same(x,y) ((x) == (y))
 
-struct BOARD {
-	U64 wpawns;
-	U64 all;
-	U32 randn;
+struct BOARD : public PRNG {
 	char player;
 	char emptyc;
+	U64 wpawns;
+	U64 all;
 
 	__device__ __host__ 
 	void copy(const BOARD& b) {
@@ -1326,25 +1327,6 @@ struct BOARD {
 			wpawns ^= move;
 		player ^= 1;
 		emptyc--;
-	}
-
-	__device__ __host__
-	void seed(int sd) {
-		randn = sd;
-	}
-
-	__device__ __host__
-	U32 rand() {
-		randn *= 214013;
-		randn += 2531011;
-		return ((randn >> 16) & 0x7fff);
-	}
-
-	__device__ __host__
-	U64 rand64() {
-		return((U64)rand()) ^ 
-			  ((U64)rand() << 15) ^ ((U64)rand() << 30) ^
-			  ((U64)rand() << 45) ^ ((U64)rand() << 60);
 	}
 
 	__host__
@@ -1366,19 +1348,17 @@ struct BOARD {
 	bool is_white_win();
 
 	int count_moves() const;
-	MOVE gen_move(int) const;
+	MOVE gen_move(const int&) const;
 	
 	void str_mov(const char*,MOVE& move);
-	MOVE get_move(const char*);
 };
-
 
 __device__
 void BOARD::make_random_move() {
 	U32 rbit = rand() % emptyc;
 	U64 move = all;
 	for(U32 i = 0;i < rbit;i++)
-		move &= move - 1; 
+		move &= move - 1;
 	move = move & -move;
 
 	do_move(move);
@@ -1394,9 +1374,8 @@ bool BOARD::is_white_win(){
 			 (((m >> 9) | (m >> 1)) & nfileABB)) 
 			 & wpawns
 			);
-		if(m & U64(0xff00000000000000)) {
+		if(m & U64(0xff00000000000000))
 			return true;
-		}
 	} while(m != oldm);
 	return false;
 }
@@ -1422,7 +1401,7 @@ int BOARD::count_moves() const {
 }
 
 __device__
-MOVE BOARD::gen_move(int index) const {
+MOVE BOARD::gen_move(const int& index) const {
 	int count = 0;
 	U64 m = all;
 	while(m) {
@@ -1447,22 +1426,6 @@ void BOARD::str_mov(const char* s,MOVE& move) {
 }
 #endif
 
-__host__ 
-MOVE BOARD::get_move(const char* str) {
-	MOVE move,move1;
-	str_mov(str,move);
-	/*/
-	int N = count_moves();
-	for(int i = 0;i < N;i++) {
-		move1 = gen_move(i);
-		if(is_same(move,move1))
-			return move1;
-	}
-	return MOVE();
-	/*/
-	return move;
-	//*/
-}
 //
 // Node
 //
@@ -1502,6 +1465,9 @@ namespace TABLE {
 	__device__ Node* head;
 	__device__ int size;
 	__device__ LOCK lock;
+	__device__ MOVE root_moves[256];
+	__device__ MOVE root_move;
+	__device__ int  n_root_moves;
 	Node* hmem_;
 
 	__device__ Node* get_node() {
@@ -1523,6 +1489,35 @@ namespace TABLE {
 		head = mem_;
 		size = tsize;
 		root_node = get_node();
+	}
+	
+	__device__
+	void generate_moves() {
+		n_root_moves = root_board.count_moves();
+		for(int i = 0;i < n_root_moves;i++)
+			root_moves[i] = root_board.gen_move(i);
+	}
+
+	__global__
+	void is_legal(MOVE move) {
+		root_move = MOVE();
+		generate_moves();
+		for(int i = 0;i < n_root_moves;i++) {
+			if(is_same(move,root_moves[i])) {
+				root_move = root_moves[i];
+				return;
+			}
+		}
+	}
+
+	__global__
+	void print_moves() {
+		char str[8];
+		generate_moves();
+		for(int i = 0;i < n_root_moves;i++) {
+			mov_str(root_moves[i],str);
+			print("%d.%5s\n",i + 1,(const char*)str);
+		}
 	}
 	
 	__global__ void print_tree(int depthLimit) {
@@ -1808,7 +1803,6 @@ void playout(U32 N) {
 		{
 			const int threadId = omp_get_thread_num();
 #endif
-			
 			BOARD b;
 			BOARD& sb = sbw[threadId / WARP];
 			Node*& n = nw[threadId / WARP];
@@ -1886,8 +1880,7 @@ void playout(U32 N) {
 
 __host__ 
 void simulate(BOARD* b,U32 N) {
-	cudaMemcpyToSymbol(TABLE::root_board,b,
-		sizeof(BOARD),0,cudaMemcpyHostToDevice);
+	cudaMemcpyToSymbol(TABLE::root_board,b,sizeof(BOARD));
 
 	TABLE::reset <<<1,1>>> ();
 	playout <<<nBlocks,nThreads>>> (N); 
@@ -1898,6 +1891,29 @@ void simulate(BOARD* b,U32 N) {
 	printf("Errors: %s\n", 
 		cudaGetErrorString(cudaPeekAtLastError()));
 }
+
+__host__ 
+MOVE get_move(BOARD* b,const char* str) {
+	cudaMemcpyToSymbol(TABLE::root_board,b,sizeof(BOARD));
+
+	MOVE move;
+	b->str_mov(str,move);
+	TABLE::is_legal<<<1,1>>>(move);
+
+	cudaMemcpyFromSymbol(&move,TABLE::root_move,sizeof(MOVE));
+	
+	return move;
+}
+
+__host__ 
+void print_moves(BOARD* b) {
+	cudaMemcpyToSymbol(TABLE::root_board,b,sizeof(BOARD));
+
+	TABLE::print_moves<<<1,1>>>();
+
+	cudaPrintfDisplay();
+}
+
 __host__
 void init_device() {
 	int count;
@@ -1958,12 +1974,29 @@ void finalize_device() {
 //
 
 __host__
-void simulate(BOARD* bo,U32 N) {
-	TABLE::root_board = *bo;
+void simulate(BOARD* b,U32 N) {
+	TABLE::root_board = *b;
 	TABLE::reset();
 	playout(N);
 	TABLE::print_tree(1);
 }
+
+__host__ 
+MOVE get_move(BOARD* b,const char* str) {
+	TABLE::root_board = *b;
+	MOVE move;
+	b->str_mov(str,move);
+	TABLE::is_legal(move);
+	move = TABLE::root_move;
+	return move;
+}
+
+__host__ 
+void print_moves(BOARD* b) {
+	TABLE::root_board = *b;
+	TABLE::print_moves();
+}
+
 __host__
 void init_device() {
 	omp_set_nested(1);
@@ -2016,9 +2049,12 @@ int main() {
 			end = clock();
 			printf("time %d\n",end - start);
 		} else if(!strcmp(str,"quit")) {
+			printf("Bye bye\n");
 			break;
+		} else if(!strcmp(str,"moves")) {
+			print_moves(&b);
 		} else {
-			MOVE move = b.get_move(str);
+			MOVE move = get_move(&b,str);
 			if(move != 0)
 				b.do_move(move);
 			else
