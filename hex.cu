@@ -1,7 +1,7 @@
 
 #define GPU __CUDACC__
 
-//#define CHESS
+#define CHESS
 
 #include <string>
 #ifdef GPU
@@ -107,7 +107,7 @@ inline void l_sub(T x,T v) {
 //
 // Collection of bitboard tricks suitable for GPUs from
 // http://chessprogramming.wikispaces.com/Bitboards
-// Thanks to Gerd Isinberg and co.
+// Thanks to Gerd Isinberg,Harald Luben and others.
 //
 __constant__
 unsigned int index64[64];
@@ -208,8 +208,9 @@ U64 antidiagAttacks( U64 occ, int sq ) {
 
 //
 // A linear congruential(LCG) pseudo random number generator (PRNG).
-// Microsoft visual studio constants are used.
+// Microsoft visual c++ constants are used.
 //
+
 struct PRNG {
 	U32 randn;
 	__device__ __host__
@@ -235,6 +236,7 @@ struct PRNG {
 //
 //sq_to_string and vice versa
 //
+
 #define file(x)          ((x) & 7)
 #define rank(x)          ((x) >> 3)
 #define SQ(x,y)          (((x) << 3) + (y))
@@ -272,10 +274,148 @@ void print_bitboard(U64 b) {
 }
 
 //
+//HEX
+//
+
+#ifndef CHESS
+
+typedef U64 MOVE;
+
+#define is_same(x,y) ((x) == (y))
+
+struct BOARD : public PRNG {
+	char player;
+	char emptyc;
+	U64 wpawns;
+	U64 all;
+
+	__device__ __host__ 
+	void copy(const BOARD& b) {
+		wpawns = b.wpawns;
+		all = b.all;
+		player = b.player;
+		emptyc = b.emptyc;
+	}
+
+	__device__ __host__
+	void do_move(const MOVE& move) {
+		all ^= move;
+		if(player == 0)
+			wpawns ^= move;
+		player ^= 1;
+		emptyc--;
+	}
+
+	__device__ __host__
+	bool is_legal(const MOVE& move) {
+		return true;
+	}
+
+	__host__
+	void init() {
+		wpawns = 0;
+		all = U64(0xffffffffffffffff);
+		emptyc = 64;
+		player = 0;
+	}
+
+	__host__
+	void print_board() const {
+		print_bitboard(wpawns);
+		print_bitboard(all);
+	}
+
+	U32 playout(const BOARD&);
+	bool make_random_move();
+	bool is_white_win();
+
+	int count_moves() const;
+	MOVE gen_move(const int&) const;
+	
+	void str_mov(const char*,MOVE& move);
+};
+
+__device__
+bool BOARD::make_random_move() {
+	if(emptyc <= 0) 
+		return false;
+
+	U32 rbit = rand() % emptyc;
+	U64 move = all;
+	for(U32 i = 0;i < rbit;i++)
+		move &= move - 1;
+	move = move & -move;
+	do_move(move);
+
+	return true;
+}
+
+__device__
+bool BOARD::is_white_win(){
+	U64 m = (wpawns & U64(0x00000000000000ff)),oldm;
+	do {
+		oldm = m;
+		m |=((((m << 8) | (m >> 8)) | 
+			 (((m << 9) | (m << 1)) & nfileHBB) | 
+			 (((m >> 9) | (m >> 1)) & nfileABB)) 
+			 & wpawns
+			);
+		if(m & U64(0xff00000000000000))
+			return true;
+	} while(m != oldm);
+	return false;
+}
+
+__device__
+U32 BOARD::playout(const BOARD& b) {
+	U32 wins = 0;
+	for(U32 i = 0;i < nLoop;i++) {
+		this->copy(b);
+
+		while(make_random_move())
+			;
+			
+		if(is_white_win())
+			wins++;
+	}
+	return wins;
+}
+
+__device__
+int BOARD::count_moves() const {
+	return emptyc;
+}
+
+__device__
+MOVE BOARD::gen_move(const int& index) const {
+	int count = 0;
+	U64 m = all;
+	while(m) {
+		if(count == index)
+			return MOVE(m & -m);
+		count++;
+		m &= m - 1;
+	}
+	return MOVE();
+}
+
+__device__
+void mov_str(const MOVE& move,char* s) {
+	int sq = firstone(move);
+	sq_str(sq,s);
+}
+__host__
+void BOARD::str_mov(const char* s,MOVE& move) {
+	int sq;
+	str_sq(s,sq);
+	move = unitBB(sq);
+}
+
+//
 // CHESS
 //
 
-#ifdef CHESS
+#else
 
 __constant__ char d_piece_name[] = "__KQRBNP";
 static const char piece_name[] = "KQRBNPkqrbnp";
@@ -311,6 +451,7 @@ typedef U32 MOVE;
 #define TO_FLAG          0x0000ff00
 #define PIECE_FLAG       0x000f0000
 #define PROMOTION_FLAG   0x00f00000
+#define CAPTURE_FLAG     0x0f000000
 #define EP_FLAG          0x10000000
 #define CASTLE_FLAG      0x20000000
 #define FROM_TO          0x0000ffff
@@ -321,15 +462,21 @@ typedef U32 MOVE;
 #define m_to(x)          (int)(((x) & TO_FLAG) >> 8)
 #define m_piece(x)       (int)(((x) & PIECE_FLAG) >> 16)
 #define m_promote(x)     (int)(((x) & PROMOTION_FLAG) >> 20)
+#define m_capture(x)     (int)(((x) & CAPTURE_FLAG) >> 24)
 #define m_make(from,to,pic,prom,flag) \
 	((from) | ((to) << 8) | ((pic) << 16) | ((prom) << 20) | (flag))
 
 //BOARD
 struct BOARD : public PRNG {
-	unsigned char player;
-	unsigned char epsquare;
-	unsigned char fifty;
-	unsigned char castle;
+	union {
+		struct {
+			unsigned char player;
+			unsigned char epsquare;
+			unsigned char fifty;
+			unsigned char castle;
+		};
+		U32 flags;
+	};
 	U64 wpieces;
 	U64 bpieces;
 	U64 kings;
@@ -367,14 +514,16 @@ struct BOARD : public PRNG {
 		printf("%s\n",fen);
 	}
 
-	U32 playout(const BOARD&);
-	void make_random_move();
+	bool is_legal(MOVE&);
+	U32  playout(const BOARD&);
+	bool make_random_move();
 	bool is_white_win();
 
-	void do_move(const MOVE& move);
+	void do_move(MOVE& move);
+	void undo_move(const MOVE& move);
 	int count_moves() const;
 	MOVE gen_move(const int&) const;
-	bool attacks(U64,int,int);
+	bool attacks(const U64&,int,int);
 
 	void set_fen(const char* fen);
 	void get_fen(char* fen) const;
@@ -382,31 +531,14 @@ struct BOARD : public PRNG {
 };
 
 __device__ __host__
-void BOARD::do_move(const MOVE& move) {
+void BOARD::do_move(MOVE& move) {
 	const int from = m_from(move);
 	const int to = m_to(move);
 	const U64 mfromBB = unitBB(from);
 	const U64 mtoBB = unitBB(to);
 
-	//erase from
-	{
-		if(player == white)
-			wpieces ^= mfromBB;
-		else
-			bpieces ^= mfromBB;
-		switch(m_piece(move)) {
-			case king: kings ^= mfromBB; break;
-			case queen: queens ^= mfromBB; break;
-			case rook: rooks ^= mfromBB; break;
-			case bishop: bishops ^= mfromBB; break;
-			case knight: knights ^= mfromBB; break;
-			case pawn: pawns ^= mfromBB; break;
-		}
-	}
-
 	//capture
-	epsquare = 0;
-	fifty++;
+	bool is_capture = false;
 	if(is_ep(move)) {
 		if(player == white) {
 			bpieces ^= unitBB(to - 8);
@@ -415,34 +547,48 @@ void BOARD::do_move(const MOVE& move) {
 			wpieces ^= unitBB(to + 8);
 			pawns ^= unitBB(to + 8);
 		}
-		fifty = 0;
+		is_capture = true;
 	} else {
 		U64 toBB;
 		if(player == white) {
 			toBB = mtoBB & bpieces;
-			if(toBB) wpieces ^= mtoBB;
+			if(toBB) bpieces ^= mtoBB;
 		} else {
 			toBB = mtoBB & wpieces;
-			if(toBB) bpieces ^= mtoBB;
+			if(toBB) wpieces ^= mtoBB;
 		}
 		if(toBB) {
-			if(toBB & pawns) pawns ^= mtoBB;
-			else if(toBB & knights) knights ^= mtoBB;
-			else if(toBB & bishops) bishops ^= mtoBB;
-			else if(toBB & rooks) rooks ^= mtoBB;
-			else if(toBB & queens) queens ^= mtoBB;
-			fifty = 0;
+			if(toBB & pawns) { pawns ^= mtoBB; move |= (pawn << 24); }
+			else if(toBB & knights) { knights ^= mtoBB; move |= (knight << 24); }
+			else if(toBB & bishops) { bishops ^= mtoBB; move |= (bishop << 24); }
+			else if(toBB & rooks) { rooks ^= mtoBB; move |= (rook << 24); }
+			else if(toBB & queens) { queens ^= mtoBB; move |= (queen << 24); }
+			is_capture = true;
 		}
 	}
 
-	//put new piece
+	//erase from and set to
 	{
-		int newp = m_promote(move) ? m_promote(move) : m_piece(move);
-		if(player == white)
+		if(player == white) {
+			wpieces ^= mfromBB;
 			wpieces ^= mtoBB;
-		else
+		} else {
+			bpieces ^= mfromBB;
 			bpieces ^= mtoBB;
-		switch(newp) {
+		}
+
+		int pic = m_piece(move);
+		switch(pic) {
+			case king: kings ^= mfromBB; break;
+			case queen: queens ^= mfromBB; break;
+			case rook: rooks ^= mfromBB; break;
+			case bishop: bishops ^= mfromBB; break;
+			case knight: knights ^= mfromBB; break;
+			case pawn: pawns ^= mfromBB; break;
+		}
+		if(m_promote(move)) 
+			pic = m_promote(move);
+		switch(pic) {
 			case king: kings ^= mtoBB; break;
 			case queen: queens ^= mtoBB; break;
 			case rook: rooks ^= mtoBB; break;
@@ -474,29 +620,123 @@ void BOARD::do_move(const MOVE& move) {
 		rooks ^= unitBB(toc);
 	} 
 
-	//enpassant
-	if(m_piece(move) == pawn) {
-		fifty = 0;
+	//flags
+	{
+		//fifty
+		fifty++;
+		if(is_capture)
+			fifty = 0;
+
+		//enpassant
+		epsquare = 0;
+		if(m_piece(move) == pawn) {
+			fifty = 0;
+			if(player == white) {
+				if((to == from + 16) && (rank(from) == RANK2))
+					epsquare = (from + to) >> 1;
+			} else {
+				if((to == from - 16) && (rank(from) == RANK7))
+					epsquare = (from + to) >> 1;
+			}
+		}
+
+		//castle
+		if(castle) {
+			if(from == E1 || to == A1 || from == A1) castle &= ~WLC_FLAG;
+			if(from == E1 || to == H1 || from == H1) castle &= ~WSC_FLAG;
+			if(from == E8 || to == A8 || from == A8) castle &= ~BLC_FLAG;
+			if(from == E8 || to == H8 || from == H8) castle &= ~BSC_FLAG;
+		}
+
+		//player
+		player ^= 1;
+	}
+}
+__device__ __host__
+void BOARD::undo_move(const MOVE& move) {
+	const int from = m_from(move);
+	const int to = m_to(move);
+	const U64 mfromBB = unitBB(from);
+	const U64 mtoBB = unitBB(to);
+	int pic;
+
+	//erase from and set to
+	{
 		if(player == white) {
-			if((to == from + 16) && (rank(from) == RANK2))
-				epsquare = (from + to) >> 1;
+			wpieces ^= mfromBB;
+			wpieces ^= mtoBB;
 		} else {
-			if((to == from - 16) && (rank(from) == RANK7))
-				epsquare = (from + to) >> 1;
+			bpieces ^= mfromBB;
+			bpieces ^= mtoBB;
+		}
+
+		pic = m_piece(move);
+		switch(pic) {
+			case king: kings ^= mfromBB; break;
+			case queen: queens ^= mfromBB; break;
+			case rook: rooks ^= mfromBB; break;
+			case bishop: bishops ^= mfromBB; break;
+			case knight: knights ^= mfromBB; break;
+			case pawn: pawns ^= mfromBB; break;
+		}
+		if(m_promote(move)) 
+			pic = m_promote(move);
+		switch(pic) {
+			case king: kings ^= mtoBB; break;
+			case queen: queens ^= mtoBB; break;
+			case rook: rooks ^= mtoBB; break;
+			case bishop: bishops ^= mtoBB; break;
+			case knight: knights ^= mtoBB; break;
+			case pawn: pawns ^= mtoBB; break;
 		}
 	}
 
 	//castle
-	if(castle) {
-		if(from == E1 || to == A1 || from == A1) castle &= ~WLC_FLAG;
-		if(from == E1 || to == H1 || from == H1) castle &= ~WSC_FLAG;
-		if(from == E8 || to == A8 || from == A8) castle &= ~BLC_FLAG;
-		if(from == E8 || to == H8 || from == H8) castle &= ~BSC_FLAG;
+	if(is_castle(move)) {
+        int fromc,toc;
+		if(to > from) {
+           fromc = to + 1;
+		   toc = to - 1;
+		} else {
+           fromc = to - 2;
+		   toc = to + 1;
+		}
+		
+		if(player == white) {
+			wpieces ^= unitBB(fromc);
+			wpieces ^= unitBB(toc);
+		} else {
+			bpieces ^= unitBB(fromc);
+			bpieces ^= unitBB(toc);
+		}
+        rooks ^= unitBB(fromc);
+		rooks ^= unitBB(toc);
+	} 
+
+	//capture
+	if(is_ep(move)) {
+		if(player == white) {
+			bpieces ^= unitBB(to - 8);
+			pawns ^= unitBB(to - 8);
+		} else {
+			wpieces ^= unitBB(to + 8);
+			pawns ^= unitBB(to + 8);
+		}
+	} else if(pic = m_capture(move)) {
+		if(player == white)
+			bpieces ^= mtoBB;
+		else
+			wpieces ^= mtoBB;
+		switch(pic) {
+			case king: kings ^= mtoBB; break;
+			case queen: queens ^= mtoBB; break;
+			case rook: rooks ^= mtoBB; break;
+			case bishop: bishops ^= mtoBB; break;
+			case knight: knights ^= mtoBB; break;
+			case pawn: pawns ^= mtoBB; break;
+		}
 	}
-
-	player ^= 1;
 }
-
 __device__
 int BOARD::count_moves() const {
 	const U64 occ = wpieces | bpieces;
@@ -1086,7 +1326,7 @@ MOVE BOARD::gen_move(const int& index) const {
 }
 
 __device__
-bool BOARD::attacks(U64 occ,int sq,int col) {
+bool BOARD::attacks(const U64& occ,int sq,int col) {
 	if(col == white) {
 		U64 wpawns = wpieces & pawns;
 		if(file(sq) > FILEA && (unitBB(sq - 9) & wpawns)) return true;
@@ -1112,11 +1352,119 @@ bool BOARD::attacks(U64 occ,int sq,int col) {
 }
 
 __device__
-void BOARD::make_random_move() {
-	U32 N = count_moves();
-	U32 index = U32(N * (rand() / float(0x7fff)));
-	MOVE move = gen_move(index);
+bool BOARD::is_legal(MOVE& move) {
+	U32 sflags;
+	
+	sflags = flags;
 	do_move(move);
+
+	int ksq;
+	if(player == white)
+		ksq = firstone(bpieces & kings);
+	else
+		ksq = firstone(wpieces & kings);
+	bool is_attacked = attacks(wpieces | bpieces,ksq,player);
+
+	flags = sflags;
+	undo_move(move);
+
+	return !is_attacked;
+}
+
+struct BITSET {
+	U32 b0;
+	U32 b1;
+	U32 b2;
+	U32 b3;
+	U32 b4;
+	U32 b5;
+	U32 b6;
+	U32 b7;
+	U32 counter;
+	
+	__device__ __host__
+	void clear() {
+		b0 = 0;
+		b1 = 0;
+		b2 = 0;
+		b3 = 0;
+		b4 = 0;
+		b5 = 0;
+		b6 = 0;
+		b7 = 0;
+		counter = 0;
+	}
+
+	__device__ __host__
+	int setbit(int index) {
+		U32 r = (1 << (index & 31));
+
+#define CASE(x) {						\
+	case x:								\
+		if(b ## x & r) return 0;		\
+		else b ## x |= r;				\
+		break;							\
+};
+		switch(index >> 5) {
+			CASE(0);
+			CASE(1);
+			CASE(2);
+			CASE(3);
+			CASE(4);
+			CASE(5);
+			CASE(6);
+			CASE(7);
+		}
+
+		counter++;
+		return 1;
+	}
+
+	__host__
+	void print_bits() {
+		printf("%08x %08x %08x %08x %08x %08x %08x %08x\n",
+			b0,b1,b2,b3,b4,b5,b6,b7);
+	}
+};
+
+__device__
+bool BOARD::make_random_move() {
+	MOVE move;
+	U32 N,index,sflags;
+	int ksq;
+
+	N = count_moves();
+	if(N <= 0) 
+		return false;
+
+	BITSET moves;
+	moves.clear();
+
+	while(true) {
+		index = U32(N * (rand() / float(0x7fff)));
+		if(!moves.setbit(index)) {
+			if(moves.counter == N)
+				return false;
+			else
+				continue;
+		}
+		move = gen_move(index);
+
+		sflags = flags;
+		do_move(move);
+
+		if(player == white)
+			ksq = firstone(bpieces & kings);
+		else
+			ksq = firstone(wpieces & kings);
+
+		if(attacks(wpieces | bpieces,ksq,player)) {
+			flags = sflags;
+			undo_move(move);
+		} else break;
+	};
+
+	return true;
 }
 
 __device__
@@ -1126,13 +1474,13 @@ bool BOARD::is_white_win(){
 
 __device__
 U32 BOARD::playout(const BOARD& b) {
-	U32 wins = 0;
+	U32 wins = 0,j;
 	for(U32 i = 0;i < nLoop;i++) {
 		this->copy(b);
 
-		for(int j = 0;j < 20;j++) {
-			make_random_move();
-		}
+		j = 0;
+		while((j < 6) && make_random_move())
+			j++;
 			
 		if(is_white_win())
 			wins++;
@@ -1297,133 +1645,6 @@ void BOARD::str_mov(const char* s,MOVE& move) {
 	str_sq(s + 2,to);
 	move = m_make(from,to,0,0,0);
 }
-//
-//HEX
-//
-#else
-
-typedef U64 MOVE;
-
-#define is_same(x,y) ((x) == (y))
-
-struct BOARD : public PRNG {
-	char player;
-	char emptyc;
-	U64 wpawns;
-	U64 all;
-
-	__device__ __host__ 
-	void copy(const BOARD& b) {
-		wpawns = b.wpawns;
-		all = b.all;
-		player = b.player;
-		emptyc = b.emptyc;
-	}
-
-	__device__ __host__
-	void do_move(const MOVE& move) {
-		all ^= move;
-		if(player == 0)
-			wpawns ^= move;
-		player ^= 1;
-		emptyc--;
-	}
-
-	__host__
-	void init() {
-		wpawns = 0;
-		all = U64(0xffffffffffffffff);
-		emptyc = 64;
-		player = 0;
-	}
-
-	__host__
-	void print_board() const {
-		print_bitboard(wpawns);
-		print_bitboard(all);
-	}
-
-	U32 playout(const BOARD&);
-	void make_random_move();
-	bool is_white_win();
-
-	int count_moves() const;
-	MOVE gen_move(const int&) const;
-	
-	void str_mov(const char*,MOVE& move);
-};
-
-__device__
-void BOARD::make_random_move() {
-	U32 rbit = rand() % emptyc;
-	U64 move = all;
-	for(U32 i = 0;i < rbit;i++)
-		move &= move - 1;
-	move = move & -move;
-
-	do_move(move);
-}
-
-__device__
-bool BOARD::is_white_win(){
-	U64 m = (wpawns & U64(0x00000000000000ff)),oldm;
-	do {
-		oldm = m;
-		m |=((((m << 8) | (m >> 8)) | 
-			 (((m << 9) | (m << 1)) & nfileHBB) | 
-			 (((m >> 9) | (m >> 1)) & nfileABB)) 
-			 & wpawns
-			);
-		if(m & U64(0xff00000000000000))
-			return true;
-	} while(m != oldm);
-	return false;
-}
-
-__device__
-U32 BOARD::playout(const BOARD& b) {
-	U32 wins = 0;
-	for(U32 i = 0;i < nLoop;i++) {
-		this->copy(b);
-
-		while(emptyc > 0)
-			make_random_move();
-			
-		if(is_white_win())
-			wins++;
-	}
-	return wins;
-}
-
-__device__
-int BOARD::count_moves() const {
-	return emptyc;
-}
-
-__device__
-MOVE BOARD::gen_move(const int& index) const {
-	int count = 0;
-	U64 m = all;
-	while(m) {
-		if(count == index)
-			return MOVE(m & -m);
-		count++;
-		m &= m - 1;
-	}
-	return MOVE();
-}
-
-__device__
-void mov_str(const MOVE& move,char* s) {
-	int sq = firstone(move);
-	sq_str(sq,s);
-}
-__host__
-void BOARD::str_mov(const char* s,MOVE& move) {
-	int sq;
-	str_sq(s,sq);
-	move = unitBB(sq);
-}
 #endif
 
 //
@@ -1499,7 +1720,7 @@ namespace TABLE {
 	}
 
 	__global__
-	void is_legal(MOVE move) {
+	void check_legal(MOVE move) {
 		root_move = MOVE();
 		generate_moves();
 		for(int i = 0;i < n_root_moves;i++) {
@@ -1583,6 +1804,8 @@ NEXT:
 		int N = b->count_moves();
 		for(int i = 0;i < N;i++) {
 			move = b->gen_move(i);
+			if(!b->is_legal(move))
+				continue;
 			node = get_node();
 			if(!node) break;
 			node->move = move;
@@ -1849,8 +2072,7 @@ void playout(U32 N) {
 					for(int i = 0;i < WARP;i++)
 						score += cache[threadId + i];
 					if(sb.player == 0) 
-						score = nLoop * WARP - score;
-						
+						score = nLoop * WARP - score;		
 					Node* current = n;
 					while(current) {
 						l_lock(current->lock);
@@ -1858,6 +2080,7 @@ void playout(U32 N) {
 						current->uct_visits += nLoop * WARP;
 						l_unlock(current->lock);
 						score = nLoop * WARP - score;
+
 						current = current->parent;
 					}
 					if(TABLE::root_node->uct_visits >= N)
@@ -1898,7 +2121,7 @@ MOVE get_move(BOARD* b,const char* str) {
 
 	MOVE move;
 	b->str_mov(str,move);
-	TABLE::is_legal<<<1,1>>>(move);
+	TABLE::check_legal<<<1,1>>>(move);
 
 	cudaMemcpyFromSymbol(&move,TABLE::root_move,sizeof(MOVE));
 	
@@ -1986,7 +2209,7 @@ MOVE get_move(BOARD* b,const char* str) {
 	TABLE::root_board = *b;
 	MOVE move;
 	b->str_mov(str,move);
-	TABLE::is_legal(move);
+	TABLE::check_legal(move);
 	move = TABLE::root_move;
 	return move;
 }
@@ -2028,7 +2251,7 @@ int main() {
 	char str[256];
 	BOARD b;
 	b.init();
-	
+
 	printf("\nType <help> for a list of commands.\n\n");
 
 	while(true) {
@@ -2045,7 +2268,7 @@ int main() {
 		} else if(!strcmp(str,"go")) {
 			clock_t start,end;
 			start = clock();
-			simulate(&b,128 * 1 * 128 * 100);
+			simulate(&b,128 * 4 * 128 * 100);
 			end = clock();
 			printf("time %d\n",end - start);
 		} else if(!strcmp(str,"quit")) {
