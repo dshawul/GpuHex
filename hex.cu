@@ -3,7 +3,12 @@
 
 #define CHESS
 
-#include <string>
+#ifdef GPU
+#	if __CUDA_ARCH__ >= 200 
+#		define HAS_INTRINSIC
+#	endif
+#endif
+
 #ifdef GPU
 #	include <cuda.h>
 #else
@@ -11,19 +16,26 @@
 #	include <math.h>
 #	include <ctime>
 #endif
+#include <string>
 
 //
 // parameters
 //
 #ifdef GPU
-#	define nThreads   64
-#	define nBlocks    28
+#	ifdef CHESS
+#		define nThreads  128
+#		define nBlocks    14
+#	else
+#		define nThreads  512
+#		define nBlocks    14
+#	endif
 #	define WARP       32
 #else
 #	define nThreads    1
 #	define nBlocks     1
 #	define WARP        1
 #endif
+
 #define nLoop     16
 #define nWarps    (nThreads / WARP)
 #define TT_SIZE   4194304
@@ -35,8 +47,12 @@
 // printf
 //
 #ifdef GPU
-#	include "cuPrintf.cu"
-#	define print(format, ...) cuPrintf(format, __VA_ARGS__)
+#	if __CUDA_ARCH__ < 200 
+#		include "cuPrintf.cu"
+#		define print(format, ...) cuPrintf(format, __VA_ARGS__)
+#	else
+#		define print(format, ...) printf(format, __VA_ARGS__)
+#	endif
 #else
 #	define print(format, ...) printf(format, __VA_ARGS__)
 #endif
@@ -110,8 +126,6 @@ inline void l_sub(T x,T v) {
 // Thanks to Gerd Isinberg,Harald Luben and others.
 //
 __constant__
-unsigned int index64[64];
-__constant__
 U64 king_attacks[64];
 __constant__
 U64 knight_attacks[64];
@@ -122,11 +136,15 @@ U64 antidiag_mask_ex[64];
 __constant__
 unsigned char first_rank_attacks[64][8];
 
-#define nfileHBB U64(0xfefefefefefefefe)
-#define nfileABB U64(0x7f7f7f7f7f7f7f7f)
+#ifdef HAS_INTRINSIC
+#	define firstone(bb) __ffsll(bb)
+#	define popcnt(bb)   __popcll(bb)
+#else
+__constant__
+int index64[64];
 
 __device__
-unsigned int firstone(U64 bb) {
+int firstone(U64 bb) {
 	unsigned int folded;
 	bb ^= bb - 1;
 	folded = (int) bb ^ (bb >> 32);
@@ -149,6 +167,7 @@ int popcnt(U64 bb) {
 	lo = (lo       +  (lo >> 4)) & k4 ;
 	return (int) (((hi + lo) * kf) >> 24);
 }
+#endif
 
 __device__
 U64 rankAttacks( U64 occ, int sq ) { 
@@ -200,6 +219,9 @@ U64 antidiagAttacks( U64 occ, int sq ) {
    return b.b & antidiag_mask_ex[sq]; 
 } 
 
+#define nfileHBB U64(0xfefefefefefefefe)
+#define nfileABB U64(0x7f7f7f7f7f7f7f7f)
+
 #define kingAttacks(sq) king_attacks[sq]
 #define knightAttacks(sq) knight_attacks[sq]
 #define rookAttacks(occ,sq) (fileAttacks(occ,sq) | rankAttacks(occ,sq))
@@ -211,8 +233,11 @@ U64 antidiagAttacks( U64 occ, int sq ) {
 // Microsoft visual c++ constants are used.
 //
 
+#define MY_RAND_MAX  0x7fff
+
 struct PRNG {
 	U32 randn;
+
 	__device__ __host__
 	void seed(int sd) {
 		randn = sd;
@@ -222,7 +247,7 @@ struct PRNG {
 	U32 rand() {
 		randn *= 214013;
 		randn += 2531011;
-		return ((randn >> 16) & 0x7fff);
+		return ((randn >> 16) & MY_RAND_MAX);
 	}
 
 	__device__ __host__
@@ -370,7 +395,7 @@ __device__
 U32 BOARD::playout(const BOARD& b) {
 	U32 wins = 0;
 	for(U32 i = 0;i < nLoop;i++) {
-		this->copy(b);
+		copy(b);
 
 		while(make_random_move())
 			;
@@ -496,10 +521,7 @@ struct BOARD : public PRNG {
 		bishops = b.bishops;
 		knights = b.knights;
 		pawns = b.pawns;
-		player = b.player;
-		epsquare = b.epsquare;
-		fifty = b.fifty;
-		castle = b.castle;
+		flags = b.flags;
 	}
 
 	__host__
@@ -558,11 +580,22 @@ void BOARD::do_move(MOVE& move) {
 			if(toBB) wpieces ^= mtoBB;
 		}
 		if(toBB) {
-			if(toBB & pawns) { pawns ^= mtoBB; move |= (pawn << 24); }
-			else if(toBB & knights) { knights ^= mtoBB; move |= (knight << 24); }
-			else if(toBB & bishops) { bishops ^= mtoBB; move |= (bishop << 24); }
-			else if(toBB & rooks) { rooks ^= mtoBB; move |= (rook << 24); }
-			else if(toBB & queens) { queens ^= mtoBB; move |= (queen << 24); }
+			if(toBB & pawns) { 
+				pawns ^= mtoBB; 
+				move |= (pawn << 24); 
+			} else if(toBB & knights) { 
+				knights ^= mtoBB; 
+				move |= (knight << 24); 
+			} else if(toBB & bishops) { 
+				bishops ^= mtoBB; 
+				move |= (bishop << 24); 
+			} else if(toBB & rooks) { 
+				rooks ^= mtoBB; 
+				move |= (rook << 24); 
+			} else if(toBB & queens) { 
+				queens ^= mtoBB; 
+				move |= (queen << 24); 
+			}
 			is_capture = true;
 		}
 	}
@@ -744,9 +777,6 @@ int BOARD::count_moves() const {
 	int from,count = 0;
 
 	if(player == white) {
-		//
-		//WHITE
-		//
 
 		//non-promotions
 		pieceb = wpieces & pawns;
@@ -846,9 +876,6 @@ int BOARD::count_moves() const {
 			}
 		}
 	} else {
-		//
-		//BLACK
-		//
 
 		//non-promotions
 		pieceb = bpieces & pawns;
@@ -976,9 +1003,6 @@ MOVE BOARD::gen_move(const int& index) const {
 };
 
 	if(player == white) {
-		//
-		//WHITE
-		//
 
 		//non-promotions
 		pieceb = wpieces & pawns;
@@ -1149,9 +1173,6 @@ MOVE BOARD::gen_move(const int& index) const {
 		}
 		
 	} else {
-		//
-		//BLACK
-		//
 
 		//non-promotions
 		pieceb = bpieces & pawns;
@@ -1354,7 +1375,7 @@ bool BOARD::attacks(const U64& occ,int sq,int col) {
 __device__
 bool BOARD::is_legal(MOVE& move) {
 	U32 sflags;
-	
+
 	sflags = flags;
 	do_move(move);
 
@@ -1419,12 +1440,6 @@ struct BITSET {
 		counter++;
 		return 1;
 	}
-
-	__host__
-	void print_bits() {
-		printf("%08x %08x %08x %08x %08x %08x %08x %08x\n",
-			b0,b1,b2,b3,b4,b5,b6,b7);
-	}
 };
 
 __device__
@@ -1441,7 +1456,7 @@ bool BOARD::make_random_move() {
 	moves.clear();
 
 	while(true) {
-		index = U32(N * (rand() / float(0x7fff)));
+		index = U32(N * (rand() / float(MY_RAND_MAX)));
 		if(!moves.setbit(index)) {
 			if(moves.counter == N)
 				return false;
@@ -1474,14 +1489,15 @@ bool BOARD::is_white_win(){
 
 __device__
 U32 BOARD::playout(const BOARD& b) {
-	U32 wins = 0,j;
+	U32 wins = 0;
 	for(U32 i = 0;i < nLoop;i++) {
-		this->copy(b);
+		copy(b);
 
-		j = 0;
-		while((j < 6) && make_random_move())
-			j++;
-			
+		for(U32 j = 0;j < 12;j++) {
+			if(!make_random_move())
+				break;
+		}
+
 		if(is_white_win())
 			wins++;
 	}
@@ -1756,8 +1772,9 @@ namespace TABLE {
 						mov_str(current->move,str);
 						print("%d.%5s %12d %12d %12.6f\n",
 							depth,(const char*)str,
-							current->uct_wins,current->uct_visits,
-							float(current->uct_wins) / current->uct_visits
+							current->uct_wins,
+							current->uct_visits,
+							current->uct_wins / float(current->uct_visits)
 							);
 					}
 
@@ -1843,16 +1860,6 @@ NEXT:
 	}
 
 	__host__ void allocate(int N) {
-		static const unsigned int mindex64[64] = {
-			63, 30,  3, 32, 59, 14, 11, 33,
-			60, 24, 50,  9, 55, 19, 21, 34,
-			61, 29,  2, 53, 51, 23, 41, 18,
-			56, 28,  1, 43, 46, 27,  0, 35,
-			62, 31, 58,  4,  5, 49, 54,  6,
-			15, 52, 12, 40,  7, 42, 45, 16,
-			25, 57, 48, 13, 10, 39,  8, 44,
-			20, 47, 38, 22, 17, 37, 36, 26
-		};
 		static const U64 mknight_attacks[64] = {
 			U64(0x0000000000020400),U64(0x0000000000050800),U64(0x00000000000a1100),U64(0x0000000000142200),
 			U64(0x0000000000284400),U64(0x0000000000508800),U64(0x0000000000a01000),U64(0x0000000000402000),
@@ -1963,7 +1970,7 @@ NEXT:
 		cudaMalloc((void**) &hmem_,N * sizeof(Node));
 		cudaMemcpyToSymbol(tsize,&N,sizeof(int));
 		cudaMemcpyToSymbol(mem_,&hmem_,sizeof(Node*));
-		cudaMemcpyToSymbol(index64,mindex64,sizeof(mindex64));
+
 		cudaMemcpyToSymbol(knight_attacks,mknight_attacks,sizeof(mknight_attacks));
 		cudaMemcpyToSymbol(king_attacks,mking_attacks,sizeof(mking_attacks));
 		cudaMemcpyToSymbol(diagonal_mask_ex,mdiagonal_mask_ex,sizeof(mdiagonal_mask_ex));
@@ -1973,13 +1980,31 @@ NEXT:
 		hmem_ = (Node*) malloc(N * sizeof(Node));
 		tsize = N;
 		mem_ = hmem_;
-		memcpy(index64,mindex64,sizeof(mindex64));
+		l_create(lock);
+
 		memcpy(knight_attacks,mknight_attacks,sizeof(mknight_attacks));
 		memcpy(king_attacks,mking_attacks,sizeof(mking_attacks));
 		memcpy(diagonal_mask_ex,mdiagonal_mask_ex,sizeof(mdiagonal_mask_ex));
 		memcpy(antidiag_mask_ex,mantidiag_mask_ex,sizeof(mantidiag_mask_ex));
 		memcpy(first_rank_attacks,mfirst_rank_attacks,sizeof(mfirst_rank_attacks));
-		l_create(lock);
+#endif
+
+#ifndef HAS_INTRINSIC
+		static const int mindex64[64] = {
+			63, 30,  3, 32, 59, 14, 11, 33,
+			60, 24, 50,  9, 55, 19, 21, 34,
+			61, 29,  2, 53, 51, 23, 41, 18,
+			56, 28,  1, 43, 46, 27,  0, 35,
+			62, 31, 58,  4,  5, 49, 54,  6,
+			15, 52, 12, 40,  7, 42, 45, 16,
+			25, 57, 48, 13, 10, 39,  8, 44,
+			20, 47, 38, 22, 17, 37, 36, 26
+		};
+#ifdef GPU
+		cudaMemcpyToSymbol(index64,mindex64,sizeof(mindex64));
+#else
+		memcpy(index64,mindex64,sizeof(mindex64));
+#endif
 #endif
 	}
 	__host__ void release() {
@@ -2071,16 +2096,21 @@ void playout(U32 N) {
 					U32 score = 0;
 					for(int i = 0;i < WARP;i++)
 						score += cache[threadId + i];
-					if(sb.player == 0) 
-						score = nLoop * WARP - score;		
+					//swap score
+					{
+						if(sb.player == 0) 
+							score = nLoop * WARP - score;		
+					}
 					Node* current = n;
 					while(current) {
 						l_lock(current->lock);
 						current->uct_wins += score;
 						current->uct_visits += nLoop * WARP;
 						l_unlock(current->lock);
-						score = nLoop * WARP - score;
-
+						//swap score
+						{
+							score = nLoop * WARP - score;
+						}
 						current = current->parent;
 					}
 					if(TABLE::root_node->uct_visits >= N)
@@ -2268,7 +2298,7 @@ int main() {
 		} else if(!strcmp(str,"go")) {
 			clock_t start,end;
 			start = clock();
-			simulate(&b,128 * 4 * 128 * 100);
+			simulate(&b,128 * 1 * 128 * 100);
 			end = clock();
 			printf("time %d\n",end - start);
 		} else if(!strcmp(str,"quit")) {
