@@ -1,0 +1,329 @@
+#include "my_types.h"
+
+//UCT parameters
+#define UCTK      0.44f
+#define FPU       1.10f
+
+//Printf
+#define print(format, ...) printf(format, __VA_ARGS__)
+
+//Occa atomics
+#define LOCK          int
+#define l_create(x)   ((x) = 0)
+#define l_trylock(x)  (occaAtomicSwap(&(x),1))
+#define l_lock(x)     while(l_trylock(x) != 0);
+#define l_unlock(x)   (occaAtomicSwap(&(x),0))
+#define l_add(x,v)	  (occaAtomicAdd(&x,v))
+#define l_sub(x,v)	  (occaAtomicSub(&x,v))
+#define l_barrier()   (occaBarrier(occaLocalMemFence))
+
+//Tree node
+typedef struct tagNode {
+	MOVE move;
+	U32 uct_wins;
+	U32 uct_visits;
+	int workers;
+	occaPointer struct tagNode* parent;
+	occaPointer struct tagNode* child;
+	occaPointer struct tagNode* next;
+	LOCK lock;
+} Node;
+
+//MCTS transposition table
+typedef struct tagTABLE {
+	int size;
+	int tsize;
+	BOARD root_board;
+	occaPointer Node* mem_;
+	occaPointer Node* root_node;
+	occaPointer Node* head;
+	LOCK lock;
+} TABLE;
+
+//firstone
+occaConstant
+unsigned int index64[64] = {
+		63, 30,  3, 32, 59, 14, 11, 33,
+		60, 24, 50,  9, 55, 19, 21, 34,
+		61, 29,  2, 53, 51, 23, 41, 18,
+		56, 28,  1, 43, 46, 27,  0, 35,
+		62, 31, 58,  4,  5, 49, 54,  6,
+		15, 52, 12, 40,  7, 42, 45, 16,
+		25, 57, 48, 13, 10, 39,  8, 44,
+		20, 47, 38, 22, 17, 37, 36, 26
+	};
+
+occaDeviceFunction
+unsigned int firstone(U64 bb) {
+	unsigned int folded;
+	bb ^= bb - 1;
+	folded = (int) bb ^ (bb >> 32);
+	return index64[folded * 0x78291ACF >> 26];
+}
+
+#define file(x)          ((x) & 7)
+#define rank(x)          ((x) >> 3)
+#define SQ(x,y)          (((x) << 3) + (y))
+
+occaDeviceFunction
+char* sq_str(const int sq,char* s) {
+	int f = file(sq);
+	int r = rank(sq);
+	*s++ = 'a' + (f);
+	*s++ = '1' + (r);
+	*s = 0;
+	return s;
+}
+
+//Node
+occaDeviceFunction
+void clear_node(occaPointer Node* n) {
+	n->uct_wins = 0;
+	n->uct_visits = 0;
+	n->parent = 0;
+	n->child = 0;
+	n->next = 0;
+	n->move = MOVE();
+	l_create(n->lock);
+	n->workers = 0;
+}
+
+//Table
+occaDeviceFunction
+occaPointer Node* get_node(occaPointer TABLE* tab) {
+	if(tab->size > 0) {
+		l_lock(tab->lock);
+		if(tab->size > 0) {
+			tab->size--;
+			tab->head++;
+			clear_node((occaPointer Node*)tab->head);
+		} else
+			tab->head = 0;
+		l_unlock(tab->lock);
+		return (occaPointer Node*) tab->head;
+	} else {
+		return 0;
+	}
+}
+
+occaKernel
+void reset_table(occaKernelInfoArg,
+				 occaPointer TABLE* tab, occaPointer Node* hmem_, const int occaVariable N) {
+	tab->mem_ = hmem_;
+	tab->head = tab->mem_;
+	tab->tsize = N;
+	tab->size = tab->tsize;
+	l_create(tab->lock);
+	tab->root_node = get_node(tab);
+}
+
+
+occaKernel
+void print_tree(occaKernelInfoArg,
+				occaPointer TABLE* tab, int depthLimit) {
+	int depth = 0,max_depth = 0,average_depth = 0;
+	int leaf_nodes = 0,total_nodes = 0;
+	char str[4];
+	int sq;
+	occaPointer Node* current = tab->root_node;
+	while(current) {
+		while(current) {
+			while(current) {
+
+				if(current->uct_visits && depth <= depthLimit) {
+					for(int i = 0;i < depth;i++)
+						print("%c",'\t');
+					
+					sq = firstone(current->move);
+					sq_str(sq,str);
+					print("%d.%s %12d %12d %12.6f\n",
+						depth,(const char*)str,
+						current->uct_wins,current->uct_visits,
+						float(current->uct_wins) / current->uct_visits
+						);
+				}
+				total_nodes++;
+				if(current->child) {
+					depth++;
+					current = current->child;
+				} else {
+					if(depth > max_depth)
+						max_depth = depth;
+					average_depth += depth;
+					leaf_nodes++;
+					break;
+				}
+			}
+NEXT:
+			if(current->next) {
+				current = current->next;
+			} else break;
+		}
+		if(current->parent) {
+			depth--;
+			current = current->parent;
+			goto NEXT;
+		} else {
+			break;
+		}
+	}
+
+	print("Total nodes   : %d\n",total_nodes);
+	print("Leaf  nodes   : %d\n",leaf_nodes);
+	print("Maximum depth : %d\n",max_depth);
+	print("Average depth : %.2f\n",average_depth / float(leaf_nodes));
+}
+
+occaDeviceFunction
+void create_children(occaPointer TABLE* tab, U64 all, occaPointer Node* n) {
+	l_lock(n->lock);
+	if(n->child) {
+		l_unlock(n->lock);
+		return;
+	}
+
+	occaPointer Node* last = n;
+	U64 m = all;
+	U64 lsb;
+	while(m) {
+		lsb = m & -m;
+
+		occaPointer Node* node = get_node(tab);
+		if(!node) break;
+		node->move = lsb;
+		node->parent = n;
+		if(last == n) last->child = node;
+		else last->next = node;
+		last = node;
+
+		m ^= lsb;
+	}
+
+	l_unlock(n->lock);
+}
+
+occaDeviceFunction
+occaPointer Node* UCT_select(occaPointer Node* n) {
+	occaPointer Node* bnode = 0;
+	occaPointer Node* current = n->child;
+	float bvalue = -1.f,value;
+	float logn = occaLog10(float(n->uct_visits + 1)) / OCCA_LOG10E;
+	while(current) {
+		if(current->uct_visits > 0) {
+			value = UCTK * occaSqrt(logn / (current->uct_visits + 1))
+				+ (current->uct_wins + 1) / float(current->uct_visits + 1);
+		} else {
+			value = FPU;
+		}
+
+		value -= (current->workers / 128.f);
+
+		if(value > bvalue) {
+			bvalue = value;
+			bnode = current;
+		}
+		current = current->next;
+	}
+	return bnode;
+}
+//
+// playout
+//
+occaKernel
+void playout(occaKernelInfoArg,
+			occaPointer TABLE* tab,
+			U32 N) {
+	//
+	// create blocks
+	//
+	occaOuterFor0;
+	{
+		const int blockId = occaOuterId0;
+		//
+		//shared data with in a block
+		//
+		occaShared U32 cache[nThreads];
+		occaShared BOARD sbw[nWarps];
+		occaShared Node* nw[nWarps];
+		occaShared bool finished;
+
+		//
+		// create threads and allocate a BOARD on register
+		//
+		occaInnerFor0
+		{
+			const int threadId = occaInnerId0;
+			const int warpId = threadId / WARP;
+			const int threadIdWarp = threadId & (WARP - 1);
+
+			BOARD b;
+			BOARD& sb = sbw[warpId];
+			Node*& n = nw[warpId];
+			seed(b, blockId * nBlocks + threadId);
+			finished = false;
+
+			//
+			//loop forever
+			//
+			while(true) {
+			
+				//get node
+				if(threadIdWarp == 0) {
+					n = tab->root_node;
+					copy_board(sb, tab->root_board);
+
+					while(n->child) {
+						n = UCT_select(n);
+						do_move(sb, n->move);
+					}
+
+					if(n->uct_visits) {
+						create_children(tab,sb.all,n);
+						occaPointer Node* next = UCT_select(n);
+						if(next) {
+							do_move(sb,next->move);
+							n = next;
+						}
+					}
+
+					l_add(n->workers,1);
+				}
+				
+				//playout the position
+				copy_board(b, sb);
+				playoutb(b, sb, cache[threadId]);
+				
+				//update result
+				if(threadIdWarp == 0) {
+					l_sub(n->workers,1);
+
+					U32 score = 0;
+					for(int i = 0;i < WARP;i++)
+						score += cache[threadId + i];
+					if(sb.player == 0) 
+						score = nLoop * WARP - score;
+						
+					Node* current = n;
+					while(current) {
+						l_lock(current->lock);
+						current->uct_wins += score;
+						current->uct_visits += nLoop * WARP;
+						l_unlock(current->lock);
+						score = nLoop * WARP - score;
+						current = current->parent;
+					}
+					if(tab->root_node->uct_visits >= N)
+						finished = true;
+				}
+				
+				//exit?
+				if(finished)
+					break;
+			}
+			//
+			// end of work
+			//
+		}
+	}
+}
+
